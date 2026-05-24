@@ -4,6 +4,7 @@ import { GoogleProvider } from './google.js';
 import { OpenAICompatProvider } from './openai-compat.js';
 import { CohereProvider } from './cohere.js';
 import { CloudflareProvider } from './cloudflare.js';
+import { OllamaLocalProvider } from './ollama-local.js';
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -137,6 +138,9 @@ register(new OpenAICompatProvider({
 // returned 402 on every model — "Quota exceeded and account balance is
 // $0.0, please pay with fiat or send tao". The "free" tier requires a
 // non-zero balance, which conflicts with the project's no-card criterion.
+
+// Ollama Local — auto-discovered local models via /api/tags
+register(new OllamaLocalProvider());
 
 export function getProvider(platform: Platform): BaseProvider | undefined {
   return providers.get(platform);

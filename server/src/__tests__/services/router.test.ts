@@ -96,4 +96,34 @@ describe('Router', () => {
     const result = routeRequest();
     expect(result.platform).toBe('groq');
   });
+
+  it('should skip non-tool-capable models when requiresTools is true', () => {
+    const db = getDb();
+
+    // Cohere is not in the tool-capable list
+    const cohereKey = encrypt('test-cohere-key');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('cohere', 'test', cohereKey.encrypted, cohereKey.iv, cohereKey.authTag, 'healthy', 1);
+
+    // Groq is in the tool-capable list
+    const groqKey = encrypt('test-groq-key');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
+
+    // Set fallback priorities
+    db.prepare("UPDATE fallback_config SET priority = 1 WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'cohere')").run();
+    db.prepare("UPDATE fallback_config SET priority = 2 WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'groq')").run();
+
+    // Without requiresTools, Cohere should be routed
+    const normalResult = routeRequest();
+    expect(normalResult.platform).toBe('cohere');
+
+    // With requiresTools, Cohere should be skipped and Groq selected
+    const toolResult = routeRequest(1000, 0, undefined, undefined, true);
+    expect(toolResult.platform).toBe('groq');
+  });
 });

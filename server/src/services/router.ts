@@ -1,4 +1,5 @@
-import { getDb } from '../db/index.js';
+import { getDb, getSetting } from '../db/index.js';
+import { ENV } from '../env.js';
 import { getProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { canMakeRequest, canUseTokens, isOnCooldown } from './ratelimit.js';
@@ -9,10 +10,13 @@ interface ModelRow {
   platform: string;
   model_id: string;
   display_name: string;
+  intelligence_rank: number;
+  speed_rank: number;
   rpm_limit: number | null;
   rpd_limit: number | null;
   tpm_limit: number | null;
   tpd_limit: number | null;
+  context_window: number | null;
 }
 
 interface KeyRow {
@@ -43,6 +47,15 @@ export interface RouteResult {
 
 // Round-robin index per platform
 const roundRobinIndex = new Map<string, number>();
+
+// Cache smart routing setting
+let isSmartRoutingEnabled = false;
+setInterval(() => {
+  try {
+    const val = getSetting('smart_routing') ?? ENV.SMART_ROUTING_ENABLED;
+    if (val !== undefined) isSmartRoutingEnabled = val === 'true';
+  } catch (e) { /* ignore until DB is ready */ }
+}, 60000);
 
 // ── Dynamic priority: track 429s per model and demote accordingly ──
 // Key: model_db_id → { count, lastHit, penalty }
@@ -120,6 +133,21 @@ export function getAllPenalties(): Array<{ modelDbId: number; count: number; pen
 }
 
 /**
+ * Helper to check if a model supports tool calling natively.
+ */
+function isToolCapable(platform: string, modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  if (platform === 'google' || id.includes('gemini')) return true;
+  if (id.includes('llama-3.3') || id.includes('llama-v3p3') || id.includes('llama-3.3-70b')) return true;
+  if (platform === 'mistral' && (id.includes('large') || id.includes('codestral') || id.includes('medium') || id.includes('devstral'))) return true;
+  if (id.includes('deepseek-v3')) return true;
+  if (id.includes('qwen3-coder') || id.includes('qwen-3-coder')) return true;
+  if (id.includes('minimax-m2.5')) return true;
+  if (id.includes('gpt-4o') || id.includes('gpt-4.1')) return true;
+  return false;
+}
+
+/**
  * Route a request to the best available model.
  * Models are sorted by (base_priority + rate_limit_penalty) so frequently
  * rate-limited models automatically sink below working ones.
@@ -128,24 +156,37 @@ export function getAllPenalties(): Array<{ modelDbId: number; count: number; pen
  * This prevents hallucination from model switching mid-conversation.
  *
  * @param estimatedTokens - estimated total tokens for rate limit check
+ * @param estimatedInputTokens - estimated input tokens for context window checks
  * @param skipKeys - set of "platform:modelId:keyId" to skip (failed on this request)
  * @param preferredModelDbId - try this model first (sticky session)
+ * @param requiresTools - filter out models that do not natively execute valid OpenAI tool-calling formats
  */
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number): RouteResult {
+export function routeRequest(estimatedTokens = 1000, estimatedInputTokens = 0, skipKeys?: Set<string>, preferredModelDbId?: number, requiresTools?: boolean): RouteResult {
   const db = getDb();
 
-  // Get fallback chain ordered by priority
+  // Get fallback chain ordered by priority, joined with models for smart routing
   const fallbackChain = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled
+    SELECT fc.model_db_id, fc.priority, fc.enabled, m.intelligence_rank, m.speed_rank, m.context_window
     FROM fallback_config fc
+    JOIN models m ON fc.model_db_id = m.id
     ORDER BY fc.priority ASC
-  `).all() as FallbackRow[];
+  `).all() as (FallbackRow & { intelligence_rank: number; speed_rank: number; context_window: number | null })[];
 
-  // Apply dynamic penalties: sort by (base priority + penalty)
-  const sortedChain = fallbackChain.map(entry => ({
-    ...entry,
-    effectivePriority: entry.priority + getPenalty(entry.model_db_id),
-  })).sort((a, b) => a.effectivePriority - b.effectivePriority);
+  // Apply dynamic penalties and smart routing boosts: sort by effective priority
+  const sortedChain = fallbackChain.map(entry => {
+    let effectivePriority = entry.priority + getPenalty(entry.model_db_id);
+    
+    // Feature A: Smart routing bonus
+    if (isSmartRoutingEnabled && !preferredModelDbId) {
+      if (estimatedInputTokens < 500 && entry.speed_rank <= 5) {
+        effectivePriority -= 50; // Boost fast models for short prompts
+      } else if (estimatedInputTokens > 5000 && entry.intelligence_rank <= 10) {
+        effectivePriority -= 50; // Boost smart models for long prompts
+      }
+    }
+    
+    return { ...entry, effectivePriority };
+  }).sort((a, b) => a.effectivePriority - b.effectivePriority);
 
   // Sticky session: move preferred model to front of chain
   if (preferredModelDbId) {
@@ -159,9 +200,19 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   for (const entry of sortedChain) {
     if (!entry.enabled) continue;
 
+    // Feature A: Context window filter
+    if (entry.context_window && estimatedInputTokens > entry.context_window * 0.9) {
+      continue; // Skip models that can't fit this prompt
+    }
+
     // Get model details
     const model = db.prepare('SELECT * FROM models WHERE id = ? AND enabled = 1').get(entry.model_db_id) as ModelRow | undefined;
     if (!model) continue;
+
+    // Filter out models that do not natively execute valid OpenAI tool-calling formats
+    if (requiresTools && !isToolCapable(model.platform, model.model_id)) {
+      continue;
+    }
 
     // Check if we have a provider for this platform
     const provider = getProvider(model.platform as any);

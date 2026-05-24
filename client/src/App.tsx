@@ -6,6 +6,10 @@ import KeysPage from '@/pages/KeysPage'
 import PlaygroundPage from '@/pages/PlaygroundPage'
 import FallbackPage from '@/pages/FallbackPage'
 import AnalyticsPage from '@/pages/AnalyticsPage'
+import AgentPage from '@/pages/AgentPage'
+import SettingsPage from '@/pages/SettingsPage'
+import TeamPage from '@/pages/TeamPage'
+import AliasesPage from '@/pages/AliasesPage'
 
 const queryClient = new QueryClient()
 
@@ -79,6 +83,10 @@ function App() {
                 <NavItem to="/keys">Keys</NavItem>
                 <NavItem to="/fallback">Fallback</NavItem>
                 <NavItem to="/analytics">Analytics</NavItem>
+                <NavItem to="/agent">Agent Hub</NavItem>
+                <NavItem to="/team">Team</NavItem>
+                <NavItem to="/aliases">Aliases</NavItem>
+                <NavItem to="/settings">Settings</NavItem>
               </nav>
               <div className="ml-auto py-2">
                 <DarkModeToggle />
@@ -92,6 +100,10 @@ function App() {
               <Route path="/keys" element={<KeysPage />} />
               <Route path="/fallback" element={<FallbackPage />} />
               <Route path="/analytics" element={<AnalyticsPage />} />
+              <Route path="/agent" element={<AgentPage />} />
+              <Route path="/team" element={<TeamPage />} />
+              <Route path="/aliases" element={<AliasesPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
               <Route path="/test" element={<Navigate to="/playground" replace />} />
               <Route path="/health" element={<Navigate to="/keys" replace />} />
             </Routes>

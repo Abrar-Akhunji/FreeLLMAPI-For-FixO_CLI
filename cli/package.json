@@ -1,0 +1,44 @@
+{
+  "name": "fixo-cli",
+  "version": "1.0.0",
+  "description": "FixO CLI — Autonomous Free Multi-Provider LLM Coding Tool",
+  "type": "module",
+  "bin": {
+    "fixo": "./dist/index.js",
+    "fixo-cli": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "cli",
+    "llm",
+    "free",
+    "openai",
+    "groq",
+    "gemini",
+    "claude-code-alternative"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@freellmapi/shared": "*",
+    "@clack/prompts": "^0.9.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

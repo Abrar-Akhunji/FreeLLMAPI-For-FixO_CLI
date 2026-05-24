@@ -46,6 +46,7 @@ export function initDb(dbPath?: string): Database.Database {
   migrateModelsV9(db);
   migrateModelsV10(db);
   migrateModelsV11(db);
+  migrateModelsV12(db);
   ensureUnifiedKey(db);
 
   console.log(`Database initialized at ${resolvedPath}`);
@@ -929,6 +930,60 @@ function migrateModelsV11(db: Database.Database) {
   apply();
 }
 
+function migrateModelsV12(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL DEFAULT '',
+      hashed_key TEXT NOT NULL UNIQUE,
+      key_prefix TEXT NOT NULL,
+      daily_token_quota INTEGER,
+      tokens_used_today INTEGER NOT NULL DEFAULT 0,
+      last_quota_reset TEXT NOT NULL DEFAULT (date('now')),
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS model_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      alias TEXT NOT NULL UNIQUE,
+      target_model_db_id INTEGER,
+      FOREIGN KEY (target_model_db_id) REFERENCES models(id)
+    );
+  `);
+
+  const settingsToInsert = [
+    ['smart_routing', 'true'],
+    ['prompt_translation', 'true'],
+    ['ollama_local_url', 'http://localhost:11434'],
+    ['ollama_local_enabled', 'false']
+  ];
+  
+  const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+  const applySettings = db.transaction(() => {
+    for (const [k, v] of settingsToInsert) {
+      insertSetting.run(k, v);
+    }
+  });
+  applySettings();
+
+  const aliasesToInsert = [
+    ['claude-3-5-sonnet', null],
+    ['claude-3-opus', null],
+    ['gpt-4', null],
+    ['gpt-4-turbo', null],
+    ['gpt-3.5-turbo', null]
+  ];
+
+  const insertAlias = db.prepare('INSERT OR IGNORE INTO model_aliases (alias, target_model_db_id) VALUES (?, ?)');
+  const applyAliases = db.transaction(() => {
+    for (const [a, t] of aliasesToInsert) {
+      insertAlias.run(a, t);
+    }
+  });
+  applyAliases();
+}
+
 function ensureUnifiedKey(db: Database.Database) {
   const existing = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string } | undefined;
   if (!existing) {
@@ -949,4 +1004,87 @@ export function regenerateUnifiedKey(): string {
   const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
   db.prepare("UPDATE settings SET value = ? WHERE key = 'unified_api_key'").run(key);
   return key;
+}
+
+export function getSetting(key: string): string | undefined {
+  const db = getDb();
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(key: string, value: string): void {
+  const db = getDb();
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+
+export function getUserKeys() {
+  const db = getDb();
+  return db.prepare('SELECT id, label, key_prefix, daily_token_quota as dailyTokenQuota, tokens_used_today as tokensUsedToday, enabled, created_at as createdAt FROM user_keys ORDER BY created_at DESC').all();
+}
+
+export function createUserKey(label: string, dailyTokenQuota: number | null) {
+  const db = getDb();
+  const rawKey = `freellmapi-user-${crypto.randomBytes(24).toString('hex')}`;
+  const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
+  const keyPrefix = rawKey.slice(0, 20) + '...';
+
+  const result = db.prepare(`
+    INSERT INTO user_keys (label, hashed_key, key_prefix, daily_token_quota)
+    VALUES (?, ?, ?, ?)
+  `).run(label, hashedKey, keyPrefix, dailyTokenQuota);
+
+  return { id: result.lastInsertRowid, rawKey, keyPrefix };
+}
+
+export function deleteUserKey(id: number) {
+  const db = getDb();
+  return db.prepare('DELETE FROM user_keys WHERE id = ?').run(id);
+}
+
+export function toggleUserKey(id: number, enabled: boolean) {
+  const db = getDb();
+  return db.prepare('UPDATE user_keys SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+}
+
+export function lookupUserKey(hashedKey: string) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM user_keys WHERE hashed_key = ?').get(hashedKey) as any;
+}
+
+export function incrementUserKeyUsage(id: number, tokens: number) {
+  const db = getDb();
+  db.prepare('UPDATE user_keys SET tokens_used_today = tokens_used_today + ? WHERE id = ?').run(tokens, id);
+}
+
+export function resetDailyQuotas() {
+  const db = getDb();
+  db.prepare("UPDATE user_keys SET tokens_used_today = 0, last_quota_reset = date('now') WHERE last_quota_reset < date('now')").run();
+}
+
+export function getModelAliases() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT ma.id, ma.alias, ma.target_model_db_id as targetModelDbId, m.display_name as targetDisplayName, m.platform as targetPlatform
+    FROM model_aliases ma
+    LEFT JOIN models m ON ma.target_model_db_id = m.id
+    ORDER BY ma.alias ASC
+  `).all();
+}
+
+export function createModelAlias(alias: string, targetId: number | null) {
+  const db = getDb();
+  const result = db.prepare('INSERT INTO model_aliases (alias, target_model_db_id) VALUES (?, ?)').run(alias, targetId);
+  return result.lastInsertRowid;
+}
+
+export function deleteModelAlias(id: number) {
+  const db = getDb();
+  return db.prepare('DELETE FROM model_aliases WHERE id = ?').run(id);
+}
+
+export function resolveAlias(alias: string): number | null | undefined {
+  const db = getDb();
+  const row = db.prepare('SELECT target_model_db_id FROM model_aliases WHERE alias = ?').get(alias) as { target_model_db_id: number | null } | undefined;
+  if (!row) return undefined;
+  return row.target_model_db_id;
 }

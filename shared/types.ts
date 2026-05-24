@@ -19,7 +19,8 @@ export type Platform =
   | 'ollama'
   | 'kilo'
   | 'pollinations'
-  | 'llm7';
+  | 'llm7'
+  | 'ollama-local';
 
 export interface Model {
   id: number;
@@ -216,4 +217,27 @@ export interface RateLimitStatus {
   tpm: { used: number; limit: number | null };
   available: boolean;
   nextResetAt: string | null;
+}
+
+export interface UserKey {
+  id: number;
+  label: string;
+  apiKey: string; // masked in list responses
+  dailyTokenQuota: number | null; // null = unlimited
+  tokensUsedToday: number;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface PromptTranslationConfig {
+  enabled: boolean;
+  stripThinkingTags: boolean;
+  enforceToolFormat: boolean;
+  systemRoleConversion: boolean;
+}
+
+export interface ModelAlias {
+  id: number;
+  alias: string;
+  targetModelDbId: number | null;
 }

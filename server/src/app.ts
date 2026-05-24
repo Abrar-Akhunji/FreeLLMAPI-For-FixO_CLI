@@ -10,6 +10,9 @@ import { fallbackRouter } from './routes/fallback.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { healthRouter } from './routes/health.js';
 import { settingsRouter } from './routes/settings.js';
+import { aliasesRouter } from './routes/model-aliases.js';
+import { usersRouter } from './routes/users.js';
+import { mcpRouter } from './routes/mcp.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +57,9 @@ export function createApp() {
   app.use('/api/analytics', analyticsRouter);
   app.use('/api/health', healthRouter);
   app.use('/api/settings', settingsRouter);
+  app.use('/api/model-aliases', aliasesRouter);
+  app.use('/api/users', usersRouter);
+  app.use('/api/mcp', mcpRouter);
 
   // OpenAI-compatible proxy
   app.use('/v1', proxyRouter);

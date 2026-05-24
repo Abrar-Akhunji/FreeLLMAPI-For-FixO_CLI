@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Premium Calculator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: radial-gradient(circle at top left, #1e293b, #0f172a);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            overflow: hidden;
+        }
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        .btn-calc {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            user-select: none;
+        }
+        .btn-calc:active {
+            transform: scale(0.92);
+        }
+        .btn-number {
+            background: rgba(255, 255, 255, 0.05);
+            color: #f8fafc;
+        }
+        .btn-number:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        .btn-operator {
+            background: rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+        }
+        .btn-operator:hover {
+            background: rgba(99, 102, 241, 0.3);
+        }
+        .btn-action {
+            background: rgba(244, 63, 94, 0.15);
+            color: #fb7185;
+        }
+        .btn-action:hover {
+            background: rgba(244, 63, 94, 0.25);
+        }
+        .btn-equals {
+            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+        .btn-equals:hover {
+            opacity: 0.9;
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
+        }
+        .display-container {
+            min-height: 120px;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: flex-end;
+            padding: 1.5rem;
+            word-break: break-all;
+        }
+        #history {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-bottom: 0.5rem;
+            height: 1.25rem;
+        }
+        #display {
+            font-size: 2.5rem;
+            font-weight: 300;
+            color: white;
+            line-height: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="glass w-full max-w-[340px] rounded-[2.5rem] overflow-hidden p-2">
+        <!-- Display -->
+        <div class="display-container">
+            <div id="history"></div>
+            <div id="display">0</div>
+        </div>
+
+        <!-- Buttons Grid -->
+        <div class="grid grid-cols-4 gap-3 p-4">
+            <!-- Row 1 -->
+            <button onclick="clearDisplay()" class="btn-calc btn-action h-14 w-14 rounded-2xl flex items-center justify-center text-lg font-semibold">C</button>
+            <button onclick="appendOperator('/')" class="btn-calc btn-operator h-14 w-14 rounded-2xl flex items-center justify-center text-xl">÷</button>
+            <button onclick="appendOperator('*')" class="btn-calc btn-operator h-14 w-14 rounded-2xl flex items-center justify-center text-xl">×</button>
+            <button onclick="backspace()" class="btn-calc btn-action h-14 w-14 rounded-2xl flex items-center justify-center text-xl">⌫</button>
+
+            <!-- Row 2 -->
+            <button onclick="appendNumber('7')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">7</button>
+            <button onclick="appendNumber('8')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">8</button>
+            <button onclick="appendNumber('9')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">9</button>
+            <button onclick="appendOperator('-')" class="btn-calc btn-operator h-14 w-14 rounded-2xl flex items-center justify-center text-2xl">−</button>
+
+            <!-- Row 3 -->
+            <button onclick="appendNumber('4')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">4</button>
+            <button onclick="appendNumber('5')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">5</button>
+            <button onclick="appendNumber('6')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">6</button>
+            <button onclick="appendOperator('+')" class="btn-calc btn-operator h-14 w-14 rounded-2xl flex items-center justify-center text-2xl">+</button>
+
+            <!-- Row 4 -->
+            <button onclick="appendNumber('1')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">1</button>
+            <button onclick="appendNumber('2')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">2</button>
+            <button onclick="appendNumber('3')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">3</button>
+            <button onclick="calculate()" class="btn-calc btn-equals h-32 w-14 rounded-2xl flex items-center justify-center text-2xl row-span-2">=</button>
+
+            <!-- Row 5 -->
+            <button onclick="toggleSign()" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-lg font-medium">±</button>
+            <button onclick="appendNumber('0')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">0</button>
+            <button onclick="appendNumber('.')" class="btn-calc btn-number h-14 w-14 rounded-2xl flex items-center justify-center text-xl font-medium">.</button>
+        </div>
+    </div>
+
+    <script>
+        let currentInput = '0';
+        let previousInput = '';
+        let operator = null;
+        let shouldResetScreen = false;
+
+        const displayElement = document.getElementById('display');
+        const historyElement = document.getElementById('history');
+
+        function updateDisplay() {
+            displayElement.innerText = currentInput;
+            if (currentInput.length > 10) {
+                displayElement.style.fontSize = '1.5rem';
+            } else if (currentInput.length > 7) {
+                displayElement.style.fontSize = '2rem';
+            } else {
+                displayElement.style.fontSize = '2.5rem';
+            }
+        }
+
+        function appendNumber(number) {
+            if (currentInput === '0' || shouldResetScreen) {
+                currentInput = number;
+                shouldResetScreen = false;
+            } else {
+                if (number === '.' && currentInput.includes('.')) return;
+                currentInput += number;
+            }
+            updateDisplay();
+        }
+
+        function appendOperator(op) {
+            if (operator !== null) calculate();
+            previousInput = currentInput;
+            operator = op;
+            historyElement.innerText = `${previousInput} ${getOpSymbol(op)}`;
+            shouldResetScreen = true;
+        }
+
+        function getOpSymbol(op) {
+            switch(op) {
+                case '/': return '÷';
+                case '*': return '×';
+                case '-': return '−';
+                case '+': return '+';
+                default: return op;
+            }
+        }
+
+        function clearDisplay() {
+            currentInput = '0';
+            previousInput = '';
+            operator = null;
+            historyElement.innerText = '';
+            updateDisplay();
+        }
+
+        function backspace() {
+            if (shouldResetScreen) return;
+            currentInput = currentInput.slice(0, -1);
+            if (currentInput === '' || currentInput === '-') currentInput = '0';
+            updateDisplay();
+        }
+
+        function toggleSign() {
+            if (currentInput === '0') return;
+            currentInput = (parseFloat(currentInput) * -1).toString();
+            updateDisplay();
+        }
+
+        function calculate() {
+            if (operator === null || shouldResetScreen) return;
+            let result;
+            const prev = parseFloat(previousInput);
+            const current = parseFloat(currentInput);
+
+            if (isNaN(prev) || isNaN(current)) return;
+
+            switch (operator) {
+                case '+': result = prev + current; break;
+                case '-': result = prev - current; break;
+                case '*': result = prev * current; break;
+                case '/': 
+                    if (current === 0) {
+                        alert("Cannot divide by zero");
+                        clearDisplay();
+                        return;
+                    }
+                    result = prev / current; 
+                    break;
+                default: return;
+            }
+
+            // Handle floating point precision
+            result = Math.round(result * 100000000) / 100000000;
+            
+            historyElement.innerText = `${previousInput} ${getOpSymbol(operator)} ${currentInput} =`;
+            currentInput = result.toString();
+            operator = null;
+            shouldResetScreen = true;
+            updateDisplay();
+        }
+
+        // Keyboard support
+        window.addEventListener('keydown', (e) => {
+            if (e.key >= 0 && e.key <= 9) appendNumber(e.key);
+            if (e.key === '.') appendNumber('.');
+            if (e.key === '=' || e.key === 'Enter') calculate();
+            if (e.key === 'Backspace') backspace();
+            if (e.key === 'Escape') clearDisplay();
+            if (['+', '-', '*', '/'].includes(e.key)) appendOperator(e.key);
+        });
+    </script>
+</body>
+</html>

@@ -152,6 +152,12 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     },
   });
 
+  // ──── Graceful exit handler ────
+  process.on('SIGINT', () => {
+    console.log('\n\n👋 FixO CLI session ended safely. Core engine offline.');
+    process.exit(0);
+  });
+
   // ──── REPL loop ────
   const promptForInput = (): void => {
     const currentBranch = git.isGitRepo() ? git.getCurrentBranch() : '';

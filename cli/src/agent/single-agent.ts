@@ -56,6 +56,16 @@ function isTrivialQuery(input: string): boolean {
   return false;
 }
 
+export function evaluateInputIntent(task: string): 'CHAT_ONLY' | 'MUTATION' {
+  const cleanTask = task.toLowerCase().trim();
+  const chatKeywords = ['guide', 'explain', 'why', 'how to', 'list', 'review', 'tell me', 'what is', 'suggest', 'what are'];
+  
+  if (chatKeywords.some(keyword => cleanTask.includes(keyword))) {
+    return 'CHAT_ONLY';
+  }
+  return 'MUTATION';
+}
+
 /* ──────────────────────── System Prompt ──────────────────────── */
 
 function buildSystemPrompt(
@@ -134,6 +144,11 @@ export class SingleAgent {
     // ──── Trivial query shortcut ────
     if (isTrivialQuery(context.task)) {
       return this.handleTrivialQuery(context, conversation, startTime);
+    }
+
+    const intent = evaluateInputIntent(context.task);
+    if (intent === 'CHAT_ONLY') {
+      return await this.executePureChatStream(context.task, conversation, context);
     }
 
     // ──── Build context ────
@@ -338,6 +353,11 @@ export class SingleAgent {
       };
     }
 
+    const intent = evaluateInputIntent(context.task);
+    if (intent === 'CHAT_ONLY') {
+      return await this.executePureChatStream(context.task, conversation, context);
+    }
+
     // ──── Complex task → tool loop ────
     const repoMap = buildRepoMap(context.cwd);
     const systemPrompt = buildSystemPrompt(repoMap, context);
@@ -529,6 +549,35 @@ export class SingleAgent {
     }
 
     return fullText;
+  }
+
+  private async executePureChatStream(
+    task: string,
+    conversation: ConversationManager,
+    context: AgentContext,
+  ): Promise<AgentResult> {
+    const startTime = Date.now();
+    const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    
+    const repoMap = buildRepoMap(context.cwd);
+    const systemPrompt = buildSystemPrompt(repoMap, context);
+    const messages: ChatMessage[] = [
+      { role: 'system', content: systemPrompt },
+      ...conversation.getMessages(),
+      { role: 'user', content: task },
+    ];
+
+    const fullResponse = await this.streamResponse(messages, context.model, totalUsage);
+    conversation.addTurn(task, fullResponse);
+
+    return {
+      success: true,
+      response: fullResponse,
+      modifiedFiles: [],
+      tokensUsed: totalUsage,
+      toolCallCount: 0,
+      durationMs: Date.now() - startTime,
+    };
   }
 
   /** Proxy health check passthrough. */

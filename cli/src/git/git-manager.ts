@@ -117,9 +117,20 @@ export class GitManager {
    * Returns the short commit hash, or null if nothing to commit.
    */
   autoCommit(task: string, modifiedFiles: string[]): string | null {
-    if (!this.isGitRepo() || !this.hasChanges()) return null;
+    if (modifiedFiles.length === 0) return null;
+    if (!this.isGitRepo()) return null;
 
     try {
+      const status = execSync('git status --porcelain', {
+        cwd: this.cwd,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      
+      if (!status) {
+        console.log('  ℹ No local filesystem variations detected. Skipping git commit.');
+        return null;
+      }
       const lowerTask = task.toLowerCase();
       let prefix = 'feat';
       if (/\bfix(es|ed|ing)?\b/.test(lowerTask)) prefix = 'fix';

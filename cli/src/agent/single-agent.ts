@@ -13,6 +13,8 @@ import { TOOL_DEFINITIONS, executeTool, type ToolCallEvent } from './tool-execut
 import { buildRepoMap } from './repo-map.js';
 import type { AgentContext, AgentResult } from '../types.js';
 import { loadConfig } from '../config.js';
+import * as p from '@clack/prompts';
+import type readline from 'readline';
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -122,6 +124,7 @@ export class SingleAgent {
   async run(
     context: AgentContext,
     conversation: ConversationManager,
+    rl?: readline.Interface,
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -197,12 +200,25 @@ export class SingleAgent {
           parsedArgs = { error: 'Failed to parse tool arguments' };
         }
 
-        const event = await executeTool(
-          toolCall.function.name,
-          parsedArgs,
-          context.cwd,
-          this.verbose,
-        );
+        const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl);
+
+        let event: ToolCallEvent;
+        if (!allowed) {
+          console.log(`  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`);
+          event = {
+            tool: toolCall.function.name,
+            args: parsedArgs,
+            result: `Error: User denied permission to execute ${toolCall.function.name}.`,
+            isWrite: false,
+          };
+        } else {
+          event = await executeTool(
+            toolCall.function.name,
+            parsedArgs,
+            context.cwd,
+            this.verbose,
+          );
+        }
 
         // Track file writes
         if (event.isWrite && event.affectedPath) {
@@ -291,6 +307,7 @@ export class SingleAgent {
   async runStreaming(
     context: AgentContext,
     conversation: ConversationManager,
+    rl?: readline.Interface,
   ): Promise<AgentResult> {
     const startTime = Date.now();
     const totalUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -384,12 +401,25 @@ export class SingleAgent {
           parsedArgs = { error: 'Failed to parse tool arguments' };
         }
 
-        const event = await executeTool(
-          toolCall.function.name,
-          parsedArgs,
-          context.cwd,
-          this.verbose,
-        );
+        const allowed = await this.askPermission(toolCall.function.name, parsedArgs, rl);
+
+        let event: ToolCallEvent;
+        if (!allowed) {
+          console.log(`  ${colors.red}✗ Permission denied for ${toolCall.function.name}${colors.reset}`);
+          event = {
+            tool: toolCall.function.name,
+            args: parsedArgs,
+            result: `Error: User denied permission to execute ${toolCall.function.name}.`,
+            isWrite: false,
+          };
+        } else {
+          event = await executeTool(
+            toolCall.function.name,
+            parsedArgs,
+            context.cwd,
+            this.verbose,
+          );
+        }
 
         if (event.isWrite && event.affectedPath) {
           if (!modifiedFiles.includes(event.affectedPath)) {
@@ -431,6 +461,45 @@ export class SingleAgent {
       toolCallCount,
       durationMs: Date.now() - startTime,
     };
+  }
+
+  /**
+   * Ask the user for permission to execute a tool.
+   * Prompts for write_file and run_command.
+   */
+  private async askPermission(
+    name: string,
+    args: Record<string, string>,
+    rl?: readline.Interface,
+  ): Promise<boolean> {
+    if (name !== 'write_file' && name !== 'run_command') {
+      return true;
+    }
+
+    if (rl) rl.pause();
+
+    try {
+      let message = '';
+      if (name === 'write_file') {
+        const filepath = args.path || 'unknown path';
+        message = `Allow write to ${colors.cyan}${colors.bold}${filepath}${colors.reset}?`;
+      } else if (name === 'run_command') {
+        const command = args.command || 'unknown command';
+        message = `Allow command execution: ${colors.yellow}${colors.bold}${command}${colors.reset}?`;
+      }
+
+      const confirmed = await p.confirm({
+        message,
+        initialValue: true,
+      });
+
+      if (p.isCancel(confirmed) || !confirmed) {
+        return false;
+      }
+      return true;
+    } finally {
+      if (rl) rl.resume();
+    }
   }
 
   /**

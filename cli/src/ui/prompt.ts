@@ -332,7 +332,7 @@ export async function startREPL(options: PromptOptions): Promise<void> {
     };
 
     // Run the agent
-    const result = await agent.runStreaming(context, conversation);
+    const result = await agent.runStreaming(context, conversation, rl);
 
     // Print result summary
     console.log('');

@@ -29,7 +29,7 @@ const DAY = 24 * 60 * MINUTE;
 export function canMakeRequest(
   platform: string,
   modelId: string,
-  keyId: number,
+  keyId: string,
   limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
 ): boolean {
   const now = Date.now();
@@ -54,7 +54,7 @@ export function canMakeRequest(
 export function canUseTokens(
   platform: string,
   modelId: string,
-  keyId: number,
+  keyId: string,
   estimatedTokens: number,
   limits: { tpm: number | null; tpd: number | null },
 ): boolean {
@@ -79,7 +79,7 @@ export function canUseTokens(
   return true;
 }
 
-export function recordRequest(platform: string, modelId: string, keyId: number) {
+export function recordRequest(platform: string, modelId: string, keyId: string) {
   const now = Date.now();
 
   const rpmKey = `${platform}:${modelId}:${keyId}:rpm`;
@@ -92,7 +92,7 @@ export function recordRequest(platform: string, modelId: string, keyId: number) 
 export function recordTokens(
   platform: string,
   modelId: string,
-  keyId: number,
+  keyId: string,
   tokens: number,
 ) {
   const now = Date.now();
@@ -107,12 +107,12 @@ export function recordTokens(
 // Cooldown: when a provider returns 429, block that model+key for a period
 const cooldowns = new Map<string, number>(); // key -> expiry timestamp
 
-export function setCooldown(platform: string, modelId: string, keyId: number, durationMs = 60_000) {
+export function setCooldown(platform: string, modelId: string, keyId: string, durationMs = 60_000) {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   cooldowns.set(key, Date.now() + durationMs);
 }
 
-export function isOnCooldown(platform: string, modelId: string, keyId: number): boolean {
+export function isOnCooldown(platform: string, modelId: string, keyId: string): boolean {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const expiry = cooldowns.get(key);
   if (!expiry) return false;
@@ -126,7 +126,7 @@ export function isOnCooldown(platform: string, modelId: string, keyId: number): 
 export function getRateLimitStatus(
   platform: string,
   modelId: string,
-  keyId: number,
+  keyId: string,
   limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
 ) {
   const now = Date.now();

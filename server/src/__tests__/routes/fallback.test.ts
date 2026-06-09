@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { initDb, ensureUser } from '../../db/index.js';
 
 async function request(app: Express, method: string, path: string, body?: any) {
   const server = app.listen(0);
@@ -10,7 +10,10 @@ async function request(app: Express, method: string, path: string, body?: any) {
 
   const res = await fetch(url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: {
+      Authorization: 'Bearer test-token',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -22,10 +25,12 @@ async function request(app: Express, method: string, path: string, body?: any) {
 describe('Fallback API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb();
     app = createApp();
+    // Register the mock user so they have a profile & default settings/configs
+    await ensureUser('test-user-uid', 'test@example.com', 'Test User', 'https://example.com/pic.jpg');
   });
 
   it('GET /api/fallback returns fallback chain', async () => {
@@ -33,7 +38,6 @@ describe('Fallback API', () => {
     expect(status).toBe(200);
     expect(Array.isArray(body)).toBe(true);
     expect(body.length).toBeGreaterThan(0);
-    // Should be sorted by priority
     for (let i = 1; i < body.length; i++) {
       expect(body[i].priority).toBeGreaterThanOrEqual(body[i - 1].priority);
     }
@@ -53,7 +57,6 @@ describe('Fallback API', () => {
   it('PUT /api/fallback updates order', async () => {
     const { body: original } = await request(app, 'GET', '/api/fallback');
 
-    // Reverse the order
     const reversed = original.map((e: any, i: number) => ({
       modelDbId: e.modelDbId,
       priority: original.length - i,
@@ -63,11 +66,9 @@ describe('Fallback API', () => {
     const { status } = await request(app, 'PUT', '/api/fallback', reversed);
     expect(status).toBe(200);
 
-    // Verify order changed
     const { body: after } = await request(app, 'GET', '/api/fallback');
     expect(after[0].modelDbId).toBe(original[original.length - 1].modelDbId);
 
-    // Restore original order
     const restore = original.map((e: any, i: number) => ({
       modelDbId: e.modelDbId,
       priority: i + 1,
@@ -81,7 +82,6 @@ describe('Fallback API', () => {
     expect(status).toBe(200);
 
     const { body } = await request(app, 'GET', '/api/fallback');
-    // Should be sorted ascending by intelligence rank
     for (let i = 1; i < body.length; i++) {
       expect(body[i].intelligenceRank).toBeGreaterThanOrEqual(body[i - 1].intelligenceRank);
     }
@@ -92,7 +92,6 @@ describe('Fallback API', () => {
     expect(status).toBe(200);
 
     const { body } = await request(app, 'GET', '/api/fallback');
-    // Should be sorted ascending by speed rank
     for (let i = 1; i < body.length; i++) {
       expect(body[i].speedRank).toBeGreaterThanOrEqual(body[i - 1].speedRank);
     }

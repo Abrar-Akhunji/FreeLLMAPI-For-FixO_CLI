@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
+import { AuthProvider, useAuth } from '@/components/AuthContext'
+import LoginPage from '@/pages/LoginPage'
 import KeysPage from '@/pages/KeysPage'
 import PlaygroundPage from '@/pages/PlaygroundPage'
 import FallbackPage from '@/pages/FallbackPage'
@@ -65,7 +67,78 @@ function Brand() {
   return (
     <div className="flex items-center gap-2">
       <span className="inline-block size-2 rounded-full bg-foreground" />
-      <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
+      <span className="font-semibold tracking-tight text-sm">free LLM API for FIXO CLI</span>
+    </div>
+  )
+}
+
+function AppContent() {
+  const { user, loading, logout } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background">
+        <div className="size-8 border-2 border-foreground border-t-transparent rounded-full animate-spin mb-4" />
+        <p className="text-xs text-muted-foreground animate-pulse">Initializing free LLM API for FIXO CLI...</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      {user && (
+        <header className="sticky top-0 z-40 bg-background/80 backdrop-blur border-b">
+          <div className="max-w-6xl mx-auto px-6 flex items-center">
+            <Brand />
+            <nav className="flex items-center gap-6 ml-10">
+              <NavItem to="/playground">Playground</NavItem>
+              <NavItem to="/keys">Keys</NavItem>
+              <NavItem to="/fallback">Fallback</NavItem>
+              <NavItem to="/analytics">Analytics</NavItem>
+              <NavItem to="/agent">Agent Hub</NavItem>
+              <NavItem to="/team">Team</NavItem>
+              <NavItem to="/aliases">Aliases</NavItem>
+              <NavItem to="/settings">Settings</NavItem>
+            </nav>
+            <div className="ml-auto flex items-center gap-4 py-2">
+              <DarkModeToggle />
+              
+              <div className="flex items-center gap-2 border-l pl-4 border-border/80">
+                {user.photoURL && (
+                  <img src={user.photoURL} alt="Profile" className="size-6 rounded-full border border-border shadow-sm" />
+                )}
+                <div className="hidden md:flex flex-col items-start leading-none gap-0.5">
+                  <span className="text-xs font-semibold text-foreground">{user.displayName}</span>
+                  <span className="text-[9px] text-muted-foreground">{user.email}</span>
+                </div>
+                <Button variant="ghost" size="sm" onClick={logout} className="text-xs h-7 px-2 border hover:bg-muted font-medium ml-1">
+                  Sign Out
+                </Button>
+              </div>
+            </div>
+          </div>
+        </header>
+      )}
+
+      <main className="max-w-6xl mx-auto px-6 py-8">
+        <Routes>
+          <Route path="/login" element={!user ? <LoginPage /> : <Navigate to="/playground" replace />} />
+          
+          {/* Protected routes */}
+          <Route path="/" element={user ? <Navigate to="/playground" replace /> : <Navigate to="/login" replace />} />
+          <Route path="/playground" element={user ? <PlaygroundPage /> : <Navigate to="/login" replace />} />
+          <Route path="/keys" element={user ? <KeysPage /> : <Navigate to="/login" replace />} />
+          <Route path="/fallback" element={user ? <FallbackPage /> : <Navigate to="/login" replace />} />
+          <Route path="/analytics" element={user ? <AnalyticsPage /> : <Navigate to="/login" replace />} />
+          <Route path="/agent" element={user ? <AgentPage /> : <Navigate to="/login" replace />} />
+          <Route path="/team" element={user ? <TeamPage /> : <Navigate to="/login" replace />} />
+          <Route path="/aliases" element={user ? <AliasesPage /> : <Navigate to="/login" replace />} />
+          <Route path="/settings" element={user ? <SettingsPage /> : <Navigate to="/login" replace />} />
+          <Route path="/test" element={<Navigate to="/playground" replace />} />
+          <Route path="/health" element={<Navigate to="/keys" replace />} />
+          <Route path="*" element={<Navigate to={user ? "/playground" : "/login"} replace />} />
+        </Routes>
+      </main>
     </div>
   )
 }
@@ -73,45 +146,14 @@ function Brand() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter basename={import.meta.env.BASE_URL}>
-        <div className="min-h-screen bg-background">
-          <header className="sticky top-0 z-40 bg-background/80 backdrop-blur border-b">
-            <div className="max-w-6xl mx-auto px-6 flex items-center">
-              <Brand />
-              <nav className="flex items-center gap-6 ml-10">
-                <NavItem to="/playground">Playground</NavItem>
-                <NavItem to="/keys">Keys</NavItem>
-                <NavItem to="/fallback">Fallback</NavItem>
-                <NavItem to="/analytics">Analytics</NavItem>
-                <NavItem to="/agent">Agent Hub</NavItem>
-                <NavItem to="/team">Team</NavItem>
-                <NavItem to="/aliases">Aliases</NavItem>
-                <NavItem to="/settings">Settings</NavItem>
-              </nav>
-              <div className="ml-auto py-2">
-                <DarkModeToggle />
-              </div>
-            </div>
-          </header>
-          <main className="max-w-6xl mx-auto px-6 py-8">
-            <Routes>
-              <Route path="/" element={<Navigate to="/playground" replace />} />
-              <Route path="/playground" element={<PlaygroundPage />} />
-              <Route path="/keys" element={<KeysPage />} />
-              <Route path="/fallback" element={<FallbackPage />} />
-              <Route path="/analytics" element={<AnalyticsPage />} />
-              <Route path="/agent" element={<AgentPage />} />
-              <Route path="/team" element={<TeamPage />} />
-              <Route path="/aliases" element={<AliasesPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/test" element={<Navigate to="/playground" replace />} />
-              <Route path="/health" element={<Navigate to="/keys" replace />} />
-            </Routes>
-          </main>
-        </div>
-      </BrowserRouter>
+      <AuthProvider>
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
+          <AppContent />
+        </BrowserRouter>
+      </AuthProvider>
     </QueryClientProvider>
   )
 }
 
 export default App
+

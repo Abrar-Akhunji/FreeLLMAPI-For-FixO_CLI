@@ -4,18 +4,17 @@
   "workspaces": [
     "shared",
     "server",
-    "client",
-    "cli"
+    "client"
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
     "test": "npm run test -w server && npm run test -w client",
     "build": "npm run build -w server && npm run build -w client",
     "build:server": "npm run build -w server",
-    "build:cli": "npm run build -w cli",
-    "cli": "npm run dev -w cli",
     "keys:import": "npm run keys:import -w server",
-    "mcp": "npm run mcp -w server"
+    "mcp": "npm run mcp -w server",
+    "pack": "npm run build && zip -r Archive.zip package.json package-lock.json shared/dist shared/package.json server/dist server/package.json client/dist client/package.json fixo-builder-firebase-adminsdk-fbsvc-652e7036dc.json",
+    "audit": "npm audit || true"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

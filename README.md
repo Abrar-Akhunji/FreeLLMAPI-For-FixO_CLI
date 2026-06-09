@@ -1,6 +1,6 @@
 <div align="center">
 
-# FreeLLMAPI
+# freeLLMAPI for FixO-CLI
 
 **One OpenAI-compatible endpoint. Eleven free LLM providers. ~1B+ tokens per month.**
 
@@ -35,7 +35,7 @@ Aggregate the free tiers from Google, Groq, Cerebras, SambaNova, NVIDIA, Mistral
 
 Every serious AI lab now offers a free tier — a few million tokens a month, a few thousand requests a day. On its own each tier is a toy. Stacked together, they add up to roughly **1.3 billion tokens per month** of working inference capacity, across dozens of models from small-and-fast to reasonably capable.
 
-The problem is that stacking them by hand is painful: fourteen different SDKs, fourteen different rate limits, fourteen places a request can fail. FreeLLMAPI collapses that into one OpenAI-compatible endpoint. Point any OpenAI client library at your local server, and it routes transparently across whichever providers you've added keys for.
+The problem is that stacking them by hand is painful: fourteen different SDKs, fourteen different rate limits, fourteen places a request can fail. free LLM API for FIXO CLI collapses that into one OpenAI-compatible endpoint. Point any OpenAI client library at your local server, and it routes transparently across whichever providers you've added keys for.
 
 ## Supported providers
 
@@ -325,7 +325,42 @@ Removed since the April 2026 review: Hugging Face, Moonshot, and MiniMax direct 
 
 ## Disclaimer
 
-**This project is for personal experimentation and learning, not production.** Free tiers exist so developers can prototype against them; they aren't a stable, supported inference substrate and shouldn't be treated as one. If you build something real on top of FreeLLMAPI, swap in a paid API before you ship. Your relationship with each upstream provider is governed by the terms you accepted when you created your account — those terms still apply when the traffic is proxied through this project, and you're responsible for complying with them.
+**This project is for personal experimentation and learning, not production.** Free tiers exist so developers can prototype against them; they aren't a stable, supported inference substrate and shouldn't be treated as one. If you build something real on top of free LLM API for FIXO CLI, swap in a paid API before you ship. Your relationship with each upstream provider is governed by the terms you accepted when you created your account — those terms still apply when the traffic is proxied through this project, and you're responsible for complying with them.
+
+## Hostinger Business Hosting Deployment
+
+This project compiles into a single, unified Node.js Express process serving both the gateway API and the static React dashboard assets.
+
+### 1. Create Subdomain
+In your Hostinger panel, create the subdomain **`freellm.firehox.com`** and point it to a folder (e.g., `/public_html/freellm`).
+
+### 2. Configure Node.js Application
+Go to **Websites -> Node.js** in Hostinger hPanel:
+- **Subdomain:** `freellm.firehox.com`
+- **Application Directory:** Select the folder (e.g. `/public_html/freellm`).
+- **Application Startup File:** Set to `server/dist/index.js`.
+- **Node version:** Select **`22.x`** (or matching version).
+
+### 3. Build & Package (Local Machine)
+From the root workspace on your local Mac, run:
+```bash
+npm run pack
+```
+This compiles the code and generates **`Archive.zip`** in the root workspace directory.
+
+### 4. Upload & Extract
+1. Open Hostinger **File Manager** for `freellm.firehox.com`.
+2. Upload the `Archive.zip` file.
+3. Extract `Archive.zip` directly into your application directory.
+
+### 5. Install Dependencies & Set Env Variables
+1. On the Hostinger Node.js panel, click **Run npm install** to build the workspaces dependencies on the host OS.
+2. Under **Environment variables**, define:
+   - `NODE_ENV` = `production`
+   - `ENCRYPTION_KEY` = `8f3c7e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e` (Your encryption key)
+   - `GOOGLE_APPLICATION_CREDENTIALS` = `fixo-builder-firebase-adminsdk-fbsvc-652e7036dc.json`
+
+3. Click **Start** or **Re-deploy** to boot the server!
 
 ## Star History
 

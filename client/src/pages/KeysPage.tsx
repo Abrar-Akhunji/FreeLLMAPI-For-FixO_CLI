@@ -25,6 +25,7 @@ const PLATFORMS: { value: Platform; label: string }[] = [
   { value: 'kilo', label: 'Kilo Gateway (anon ok)' },
   { value: 'pollinations', label: 'Pollinations (anon ok)' },
   { value: 'llm7', label: 'LLM7 (anon ok)' },
+  { value: 'zen', label: 'Zen (OpenCode)' },
 ]
 
 const PLATFORM_HELPERS: Record<Platform, {
@@ -98,6 +99,12 @@ const PLATFORM_HELPERS: Record<Platform, {
     freeTier: 'Free trials upon registration',
     models: 'GLM-4 Flash, GLM-4',
     tips: 'Leading Chinese-English bilingual LLM provider.'
+  },
+  zen: {
+    url: 'https://opencode.ai/zen',
+    freeTier: 'Free models list (Step 3.5 Flash Free, GLM 4.7 Flash Free, DeepSeek V3.2)',
+    models: 'Step 3.5 Flash Free, GLM 4.7 Flash Free, DeepSeek V3.2',
+    tips: 'OpenCode Zen recommended provider. Connect with your Zen API key!'
   },
   ollama: {
     url: 'https://ollama.com/',
@@ -277,7 +284,7 @@ function PlatformOnboardingHub() {
       </div>
 
       <div className="p-3 rounded-md bg-emerald-500/5 border border-emerald-500/10 text-[11px] text-muted-foreground leading-relaxed">
-        💡 **Tip:** FreeLLMAPI load-balances and cascades requests automatically. Configuring 3+ providers secures 99.9% routing reliability.
+        💡 **Tip:** free LLM API for FIXO CLI load-balances and cascades requests automatically. Configuring 3+ providers secures 99.9% routing reliability.
       </div>
     </section>
   )

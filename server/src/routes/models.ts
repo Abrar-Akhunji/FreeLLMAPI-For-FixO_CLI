@@ -1,50 +1,59 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
+import type { Response } from 'express';
+import { getGlobalModels, getUserFallbackConfig, getUserApiKeys } from '../db/index.js';
 import { hasProvider } from '../providers/index.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
 
 export const modelsRouter = Router();
 
-// List all models with availability info
-modelsRouter.get('/', (_req: Request, res: Response) => {
-  const db = getDb();
-  const models = db.prepare(`
-    SELECT m.*, fc.priority, fc.enabled as fallback_enabled
-    FROM models m
-    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-    ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
-  `).all() as any[];
+modelsRouter.use(authMiddleware);
 
-  // Count keys per platform
-  const keyCounts = db.prepare(`
-    SELECT platform, COUNT(*) as count
-    FROM api_keys
-    WHERE enabled = 1
-    GROUP BY platform
-  `).all() as { platform: string; count: number }[];
+modelsRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const globalModels = await getGlobalModels();
+    const fallbackConfig = await getUserFallbackConfig(uid);
+    const userKeys = await getUserApiKeys(uid);
 
-  const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
+    const fallbackMap = new Map(fallbackConfig.map(f => [f.modelDbId, f]));
 
-  const result = models.map(m => ({
-    id: m.id,
-    platform: m.platform,
-    modelId: m.model_id,
-    displayName: m.display_name,
-    intelligenceRank: m.intelligence_rank,
-    speedRank: m.speed_rank,
-    sizeLabel: m.size_label,
-    rpmLimit: m.rpm_limit,
-    rpdLimit: m.rpd_limit,
-    tpmLimit: m.tpm_limit,
-    tpdLimit: m.tpd_limit,
-    monthlyTokenBudget: m.monthly_token_budget,
-    contextWindow: m.context_window,
-    enabled: m.enabled === 1,
-    priority: m.priority,
-    fallbackEnabled: m.fallback_enabled === 1,
-    hasProvider: hasProvider(m.platform),
-    keyCount: keyCountMap.get(m.platform) ?? 0,
-  }));
+    const keyCountMap = new Map<string, number>();
+    for (const key of userKeys) {
+      if (key.enabled) {
+        keyCountMap.set(key.platform, (keyCountMap.get(key.platform) || 0) + 1);
+      }
+    }
 
-  res.json(result);
+    const result = globalModels.map(m => {
+      const fb = fallbackMap.get(m.id);
+      return {
+        id: m.id,
+        platform: m.platform,
+        modelId: m.modelId,
+        displayName: m.displayName,
+        intelligenceRank: m.intelligenceRank,
+        speedRank: m.speedRank,
+        sizeLabel: m.sizeLabel,
+        rpmLimit: m.rpmLimit,
+        rpdLimit: m.rpdLimit,
+        tpmLimit: m.tpmLimit,
+        tpdLimit: m.tpdLimit,
+        monthlyTokenBudget: m.monthlyTokenBudget,
+        contextWindow: m.contextWindow,
+        enabled: m.enabled,
+        priority: fb ? fb.priority : m.intelligenceRank,
+        fallbackEnabled: fb ? fb.enabled : m.enabled,
+        hasProvider: hasProvider(m.platform as any),
+        keyCount: keyCountMap.get(m.platform) ?? 0,
+      };
+    });
+
+    result.sort((a, b) => a.priority - b.priority);
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching models:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });

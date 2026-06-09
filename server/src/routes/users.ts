@@ -1,33 +1,33 @@
 import { Router } from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Response } from 'express';
 import { z } from 'zod';
-import { getUserKeys, createUserKey, deleteUserKey, getUnifiedApiKey } from '../db/index.js';
-import crypto from 'crypto';
+import { getUserClientKeys, createClientKey, deleteClientKey } from '../db/index.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
+import { sanitizeParams } from '../middleware/sanitizeParams.js';
 
 export const usersRouter = Router();
 
-function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (!token || !crypto.timingSafeEqual(Buffer.from(token.padEnd(64)), Buffer.from(getUnifiedApiKey().padEnd(64)))) {
-    res.status(401).json({ error: { message: 'Admin key required' } });
-    return;
-  }
-  next();
-}
-
-usersRouter.use(requireAdmin);
+usersRouter.use(authMiddleware);
 
 const userKeySchema = z.object({
-  name: z.string().min(1),
+  name: z.string().min(1).transform(val => val.replace(/[<>]/g, '')),
   role: z.enum(['admin', 'member']).default('member'),
   daily_quota: z.number().nullable().default(null)
 });
 
-usersRouter.get('/', (req: Request, res: Response) => {
-  res.json(getUserKeys());
+usersRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const clientKeys = await getUserClientKeys(uid);
+    res.json(clientKeys);
+  } catch (error) {
+    console.error('Error fetching client keys:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
-usersRouter.post('/', (req: Request, res: Response) => {
+usersRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   const parsed = userKeySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -35,23 +35,41 @@ usersRouter.post('/', (req: Request, res: Response) => {
   }
   
   try {
-    const { id, rawKey } = createUserKey(parsed.data.name, parsed.data.daily_quota);
-    res.status(201).json({ id, name: parsed.data.name, role: parsed.data.role, daily_quota: parsed.data.daily_quota, key: rawKey });
+    const uid = req.user!.uid;
+    const { rawKey, keyPrefix } = await createClientKey(uid, parsed.data.name, parsed.data.daily_quota);
+    
+    const clientKeys = await getUserClientKeys(uid);
+    const createdKey = clientKeys.find(k => k.keyPrefix === keyPrefix);
+
+    res.status(201).json({
+      id: createdKey ? createdKey.id : '',
+      name: parsed.data.name,
+      role: parsed.data.role,
+      daily_quota: parsed.data.daily_quota,
+      key: rawKey
+    });
   } catch (err: any) {
-    res.status(500).json({ error: { message: 'Failed to create user key' } });
+    console.error('Error creating client key:', err);
+    res.status(500).json({ error: { message: 'Failed to create client key' } });
   }
 });
 
-usersRouter.delete('/:id', (req: Request, res: Response) => {
-  const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) {
+usersRouter.delete('/:id', sanitizeParams, async (req: AuthenticatedRequest, res: Response) => {
+  const keyId = req.params.id as string;
+  if (!keyId) {
     res.status(400).json({ error: { message: 'Invalid ID' } });
     return;
   }
-  const result = deleteUserKey(id);
-  if (result.changes === 0) {
-    res.status(404).json({ error: { message: 'User not found' } });
-    return;
+  try {
+    const uid = req.user!.uid;
+    const success = await deleteClientKey(uid, keyId);
+    if (!success) {
+      res.status(404).json({ error: { message: 'Client key not found' } });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting client key:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
   }
-  res.json({ success: true });
 });

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initDb, ensureUser } from '../../db/index.js';
+import { firestore } from '../../lib/firebaseAdmin.js';
 
 async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0);
@@ -23,29 +24,44 @@ async function request(app: Express, method: string, path: string, body?: any, h
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
+let testUserUnifiedKey = '';
+
 function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+  return { Authorization: `Bearer ${testUserUnifiedKey}` };
+}
+
+function apiHeaders() {
+  return { Authorization: 'Bearer test-token' };
 }
 
 describe('Virtual "auto" model', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb();
     app = createApp();
   });
 
   beforeEach(async () => {
-    const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    if ('data' in firestore) {
+      const keys = Object.keys((firestore as any).data);
+      for (const k of keys) {
+        if (!k.startsWith('global_models/')) {
+          delete (firestore as any).data[k];
+        }
+      }
+    }
+
+    // Register a mock user and get their unified key
+    const user = await ensureUser('test-user-uid', 'test@example.com', 'Test User', 'https://example.com/pic.jpg');
+    testUserUnifiedKey = user.unifiedApiKey;
 
     const addKey = await request(app, 'POST', '/api/keys', {
       platform: 'groq',
       key: 'gsk_auto_model_test',
       label: 'auto-model',
-    });
+    }, apiHeaders());
     expect(addKey.status).toBe(201);
   });
 
@@ -62,7 +78,6 @@ describe('Virtual "auto" model', () => {
       object: 'model',
       owned_by: 'freellmapi',
     });
-    // Real catalog models still follow.
     expect(body.data.length).toBeGreaterThan(1);
   });
 
@@ -71,7 +86,7 @@ describe('Virtual "auto" model', () => {
 
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
       const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+      if (urlStr.includes('api.groq.com/openai/v1/chat/completions') || urlStr.includes('api.groq.com')) {
         return {
           ok: true,
           json: () => Promise.resolve({

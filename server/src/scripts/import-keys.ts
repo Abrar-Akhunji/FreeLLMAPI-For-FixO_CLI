@@ -1,16 +1,16 @@
 /**
- * CLI Key Bulk Importer Script
+ * CLI Key Bulk Importer Script (Firestore version)
  * Usage:
  *   1. Direct command line import:
- *      npx tsx src/scripts/import-keys.ts --platform=google --key=AIzaSy... --label="Gemini Key"
+ *      npx tsx src/scripts/import-keys.ts --userId=uid123 --platform=google --key=AIzaSy... --label="Gemini Key"
  *   2. File bulk import:
- *      npx tsx src/scripts/import-keys.ts --file=path/to/keys.txt
+ *      npx tsx src/scripts/import-keys.ts --userId=uid123 --file=path/to/keys.txt
  *      (where keys.txt has lines: platform,key,label)
  */
 import fs from 'fs';
 import path from 'path';
-import { initDb, getDb } from '../db/index.js';
-import { encrypt, maskKey } from '../lib/crypto.js';
+import { initDb, addUserApiKey } from '../db/index.js';
+import { maskKey } from '../lib/crypto.js';
 
 const PLATFORMS = [
   'google', 'groq', 'cerebras', 'sambanova', 'nvidia', 'mistral',
@@ -37,7 +37,7 @@ function parseArgs(args: string[]): Record<string, string> {
   return result;
 }
 
-function insertKey(db: any, platform: string, key: string, label: string): boolean {
+async function insertKey(uid: string, platform: string, key: string, label: string): Promise<boolean> {
   if (!validatePlatform(platform)) {
     console.error(`[Error] Invalid platform: "${platform}". Must be one of: ${PLATFORMS.join(', ')}`);
     return false;
@@ -48,29 +48,29 @@ function insertKey(db: any, platform: string, key: string, label: string): boole
     return false;
   }
 
-  const { encrypted, iv, authTag } = encrypt(key.trim());
   const trimmedLabel = label.trim() || `${platform.toUpperCase()} Import`;
 
   try {
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, 'unknown', 1)
-    `).run(platform, trimmedLabel, encrypted, iv, authTag);
-
-    console.log(`✓ Successfully imported key for [${platform}] - Label: "${trimmedLabel}" - Key: ${maskKey(key)}`);
+    await addUserApiKey(uid, platform, key.trim(), trimmedLabel);
+    console.log(`✓ Successfully imported key for user [${uid}] platform [${platform}] - Label: "${trimmedLabel}" - Key: ${maskKey(key)}`);
     return true;
   } catch (error: any) {
-    console.error(`[Error] Database insert failed for platform "${platform}": ${error.message}`);
+    console.error(`[Error] Firestore insert failed for platform "${platform}": ${error.message}`);
     return false;
   }
 }
 
 async function main() {
-  // Initialize SQLite database
-  initDb();
-  const db = getDb();
-
   const options = parseArgs(process.argv.slice(2));
+
+  const userId = options.userId;
+  if (!userId) {
+    console.error('[Error] You must specify a --userId option (e.g. --userId=uid123)');
+    process.exit(1);
+  }
+
+  // Initialize Firestore
+  await initDb();
 
   if (options.file) {
     const filePath = path.resolve(options.file);
@@ -88,7 +88,6 @@ async function main() {
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      // Skip empty lines or comments
       if (!line || line.startsWith('#') || line.startsWith('//')) continue;
 
       const parts = line.split(',');
@@ -100,9 +99,9 @@ async function main() {
 
       const platform = parts[0].trim().toLowerCase();
       const key = parts[1].trim();
-      const label = parts.slice(2).join(',').trim(); // label can contain commas
+      const label = parts.slice(2).join(',').trim();
 
-      if (insertKey(db, platform, key, label)) {
+      if (await insertKey(userId, platform, key, label)) {
         successCount++;
       } else {
         failCount++;
@@ -111,26 +110,26 @@ async function main() {
 
     console.log(`\nBulk Import Completed: ${successCount} successful, ${failCount} failed.`);
   } else if (options.platform && options.key) {
-    const success = insertKey(db, options.platform.toLowerCase(), options.key, options.label || '');
+    const success = await insertKey(userId, options.platform.toLowerCase(), options.key, options.label || '');
     if (!success) process.exit(1);
   } else {
     console.log(`
-FreeLLMAPI CLI Key Importer Utility
-===================================
+free LLM API for FIXO CLI Key Importer Utility (Firestore Version)
+======================================================
 
 Usage Options:
 
 1. Direct Command Line Import:
-   npm run keys:import -- --platform=<platform> --key=<key> [--label="My Key Label"]
+   npm run keys:import -- --userId=<userId> --platform=<platform> --key=<key> [--label="My Key Label"]
 
    Example:
-   npm run keys:import -- --platform=groq --key=gsk_12345 --label="Primary Groq Key"
+   npm run keys:import -- --userId=uid123 --platform=groq --key=gsk_12345 --label="Primary Groq Key"
 
 2. File Bulk Import:
-   npm run keys:import -- --file=<path-to-file>
+   npm run keys:import -- --userId=<userId> --file=<path-to-file>
 
    Example:
-   npm run keys:import -- --file=keys-list.txt
+   npm run keys:import -- --userId=uid123 --file=keys-list.txt
 
    File Format (one key per line, commas or hashtag comments allowed):
    # platform,key,label

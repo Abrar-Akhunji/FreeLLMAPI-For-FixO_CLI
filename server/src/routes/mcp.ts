@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import { getMcpLogs, recordToolCall, clearMcpLogs, computeLineDiff } from '../services/mcpLog.js';
 import { buildWorkspaceIndex, getIndexStatus } from '../services/indexer.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
 
 export const mcpRouter = Router();
+
+mcpRouter.use(authMiddleware);
 
 // Retrieve all agent logs
 mcpRouter.get('/logs', (req, res) => {

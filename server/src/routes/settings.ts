@@ -1,48 +1,74 @@
 import { Router } from 'express';
-import type { Request, Response, NextFunction } from 'express';
-import { getUnifiedApiKey, regenerateUnifiedKey, getSetting, setSetting } from '../db/index.js';
-import crypto from 'crypto';
+import type { Response } from 'express';
+import { z } from 'zod';
+import { getUserSettings, setUserSetting, getUnifiedApiKey, regenerateUnifiedKey } from '../db/index.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
 
 export const settingsRouter = Router();
 
-function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (!token || !crypto.timingSafeEqual(Buffer.from(token.padEnd(64)), Buffer.from(getUnifiedApiKey().padEnd(64)))) {
-    res.status(401).json({ error: { message: 'Admin key required' } });
+settingsRouter.use(authMiddleware);
+
+// Get current settings
+settingsRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const settings = await getUserSettings(uid);
+    const unifiedApiKey = await getUnifiedApiKey(uid);
+
+    res.json({
+      unified_api_key: unifiedApiKey,
+      smart_routing: settings.smart_routing || 'false',
+      prompt_translation: settings.prompt_translation || 'false',
+      ollama_local_enabled: settings.ollama_local_enabled || 'false',
+      ollama_local_url: settings.ollama_local_url || 'http://localhost:11434',
+      multi_tenant_auth: 'true'
+    });
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
+});
+
+const updateSettingsSchema = z.object({
+  smart_routing: z.union([z.boolean(), z.enum(['true', 'false'])]).optional().transform(val => val !== undefined ? String(val) : undefined),
+  prompt_translation: z.union([z.boolean(), z.enum(['true', 'false'])]).optional().transform(val => val !== undefined ? String(val) : undefined),
+  ollama_local_enabled: z.union([z.boolean(), z.enum(['true', 'false'])]).optional().transform(val => val !== undefined ? String(val) : undefined),
+  ollama_local_url: z.string().max(256).optional().transform(val => val?.replace(/[<>]/g, '')),
+});
+
+// Update settings
+settingsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
+  const parsed = updateSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  next();
-}
 
-// Get the unified API key
-settingsRouter.get('/api-key', (_req: Request, res: Response) => {
-  res.json({ apiKey: getUnifiedApiKey() });
+  try {
+    const uid = req.user!.uid;
+    const { smart_routing, prompt_translation, ollama_local_enabled, ollama_local_url } = parsed.data;
+
+    if (smart_routing !== undefined) await setUserSetting(uid, 'smart_routing', smart_routing);
+    if (prompt_translation !== undefined) await setUserSetting(uid, 'prompt_translation', prompt_translation);
+    if (ollama_local_enabled !== undefined) await setUserSetting(uid, 'ollama_local_enabled', ollama_local_enabled);
+    if (ollama_local_url !== undefined) await setUserSetting(uid, 'ollama_local_url', ollama_local_url);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating settings:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
-// Regenerate the unified API key
-settingsRouter.post('/api-key/regenerate', (_req: Request, res: Response) => {
-  const newKey = regenerateUnifiedKey();
-  res.json({ apiKey: newKey });
-});
-
-// Get global settings
-settingsRouter.get('/global', requireAdmin, (_req: Request, res: Response) => {
-  res.json({
-    smart_routing: getSetting('smart_routing') || 'false',
-    prompt_translation: getSetting('prompt_translation') || 'false',
-    ollama_local_enabled: getSetting('ollama_local_enabled') || 'false',
-    ollama_local_url: getSetting('ollama_local_url') || 'http://localhost:11434',
-    multi_tenant_auth: getSetting('multi_tenant_auth') || 'false'
-  });
-});
-
-// Update global settings
-settingsRouter.put('/global', requireAdmin, (req: Request, res: Response) => {
-  const { smart_routing, prompt_translation, ollama_local_enabled, ollama_local_url, multi_tenant_auth } = req.body;
-  if (smart_routing !== undefined) setSetting('smart_routing', String(smart_routing));
-  if (prompt_translation !== undefined) setSetting('prompt_translation', String(prompt_translation));
-  if (ollama_local_enabled !== undefined) setSetting('ollama_local_enabled', String(ollama_local_enabled));
-  if (ollama_local_url !== undefined) setSetting('ollama_local_url', String(ollama_local_url));
-  if (multi_tenant_auth !== undefined) setSetting('multi_tenant_auth', String(multi_tenant_auth));
-  res.json({ success: true });
+// Regenerate unified API key
+settingsRouter.post('/regenerate-key', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const newKey = await regenerateUnifiedKey(uid);
+    res.json({ success: true, key: newKey });
+  } catch (error) {
+    console.error('Error regenerating unified API key:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });

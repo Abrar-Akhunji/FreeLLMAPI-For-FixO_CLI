@@ -1,7 +1,5 @@
 import type { ChatMessage, Platform } from '@freellmapi/shared/types.js';
 import type { CompletionOptions } from '../providers/base.js';
-import { getSetting } from '../db/index.js';
-import { ENV } from '../env.js';
 
 export function translatePrompt(
   messages: ChatMessage[],
@@ -10,10 +8,9 @@ export function translatePrompt(
   contextWindow: number | null,
   estimatedInputTokens: number,
   options: CompletionOptions,
+  isPromptTranslationEnabled: boolean,
 ): { messages: ChatMessage[]; options: CompletionOptions } {
-  const isEnabled = (getSetting('prompt_translation') ?? ENV.PROMPT_TRANSLATION_ENABLED) === 'true';
-  
-  if (!isEnabled) {
+  if (!isPromptTranslationEnabled) {
     return { messages, options };
   }
 

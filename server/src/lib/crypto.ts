@@ -1,17 +1,10 @@
 import crypto from 'crypto';
-import Database from 'better-sqlite3';
+import { firestore } from './firebaseAdmin.js';
 
 const ALGORITHM = 'aes-256-gcm';
 
 let cachedKey: Buffer | null = null;
 
-/**
- * AES-256-GCM uses a 32-byte key, hex-encoded as 64 chars.
- * A typo'd ENCRYPTION_KEY (e.g. "abc") would historically fall through
- * the placeholder check, get truncated to 1.5 bytes, and only fail at
- * the first encrypt() call with a cryptic node:crypto error. Validate
- * the length up front and fail fast with an actionable message.
- */
 const KEY_BYTES = 32;
 const KEY_HEX_LEN = KEY_BYTES * 2;
 
@@ -26,27 +19,43 @@ function parseHexKey(value: string, source: 'env' | 'db'): Buffer {
 }
 
 /**
- * Initialize encryption key from env, DB, or generate a new one.
- * Must be called after DB is initialized.
+ * Initialize encryption key from env, Firestore, or generate a new one.
+ * Must be called after Firebase Admin is initialized.
  */
-export function initEncryptionKey(db: Database.Database): void {
+export async function initEncryptionKey(): Promise<void> {
   // 1. Check env var
   const envKey = process.env.ENCRYPTION_KEY;
+  
+  if (process.env.NODE_ENV === 'production') {
+    if (!envKey || envKey === 'your-64-char-hex-key-here') {
+      throw new Error(
+        'ENCRYPTION_KEY must be configured in production environment. ' +
+        'Please generate a secure 64-character hex key (32 bytes) and set it in your environment variables.'
+      );
+    }
+    cachedKey = parseHexKey(envKey, 'env');
+    return;
+  }
+
   if (envKey && envKey !== 'your-64-char-hex-key-here') {
     cachedKey = parseHexKey(envKey, 'env');
     return;
   }
 
-  // 2. Check DB for persisted key
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'encryption_key'").get() as { value: string } | undefined;
-  if (row) {
-    cachedKey = parseHexKey(row.value, 'db');
-    return;
+  // 2. Check Firestore for persisted key
+  const globalSettingsRef = firestore.collection('global_settings').doc('encryption');
+  const doc = await globalSettingsRef.get();
+  if (doc.exists) {
+    const data = doc.data();
+    if (data && data.value) {
+      cachedKey = parseHexKey(data.value, 'db');
+      return;
+    }
   }
 
   // 3. Generate and persist
   cachedKey = crypto.randomBytes(KEY_BYTES);
-  db.prepare("INSERT INTO settings (key, value) VALUES ('encryption_key', ?)").run(cachedKey.toString('hex'));
+  await globalSettingsRef.set({ value: cachedKey.toString('hex') });
 }
 
 function getEncryptionKey(): Buffer {

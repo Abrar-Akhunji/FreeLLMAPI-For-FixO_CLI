@@ -1,8 +1,22 @@
+import { auth } from './firebase.js';
+
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  
+  const user = auth.currentUser;
+  if (user) {
+    try {
+      const token = await user.getIdToken();
+      headers['Authorization'] = `Bearer ${token}`;
+    } catch (err) {
+      console.error('Failed to get user ID token:', err);
+    }
+  }
+
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: { ...headers, ...options?.headers },
     ...options,
   });
   if (!res.ok) {
@@ -11,3 +25,4 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   }
   return res.json();
 }
+

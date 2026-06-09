@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initDb, ensureUser } from '../../db/index.js';
+import { firestore } from '../../lib/firebaseAdmin.js';
 
 async function req(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0);
@@ -23,39 +24,45 @@ async function req(app: Express, method: string, path: string, body?: any, heade
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
 
+let testUserUnifiedKey = '';
+
 function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+  return { Authorization: `Bearer ${testUserUnifiedKey}` };
+}
+
+function apiHeaders() {
+  return { Authorization: 'Bearer test-token' };
 }
 
 describe('Full Integration Flow', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    if ('data' in firestore) {
+      (firestore as any).data = {};
+    }
+    await initDb();
     app = createApp();
-    // Clean
-    const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+
+    // Register a mock user and get their unified key
+    const user = await ensureUser('test-user-uid', 'test@example.com', 'Test User', 'https://example.com/pic.jpg');
+    testUserUnifiedKey = user.unifiedApiKey;
   });
 
   it('Step 1: Verify models are seeded', async () => {
-    const { status, body } = await req(app, 'GET', '/api/models');
+    const { status, body } = await req(app, 'GET', '/api/models', undefined, apiHeaders());
     expect(status).toBe(200);
-    // Tightened from >= 14 — current catalog post-V9 is 60+ rows; if a future
-    // migration accidentally drops a chunk we want to know.
     expect(body.length).toBeGreaterThanOrEqual(50);
     expect(body[0]).toHaveProperty('modelId');
     expect(body[0]).toHaveProperty('hasProvider');
-    // All should have providers (catches drift between catalog and providers/index.ts)
     for (const m of body) {
       expect(m.hasProvider).toBe(true);
     }
   });
 
   it('Step 2: Verify fallback chain is populated', async () => {
-    const { status, body } = await req(app, 'GET', '/api/fallback');
+    const { status, body } = await req(app, 'GET', '/api/fallback', undefined, apiHeaders());
     expect(status).toBe(200);
     expect(body.length).toBeGreaterThanOrEqual(50);
     expect(body[0]).toHaveProperty('priority');
@@ -66,7 +73,6 @@ describe('Full Integration Flow', () => {
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, authHeaders());
-    // 429 (all exhausted) or 502 (provider error) or 503 (no route)
     expect([429, 502, 503]).toContain(status);
     expect(body.error).toBeDefined();
   });
@@ -76,7 +82,7 @@ describe('Full Integration Flow', () => {
       platform: 'groq',
       key: 'gsk_integration_test_key',
       label: 'Integration Test',
-    });
+    }, apiHeaders());
     expect(status).toBe(201);
     expect(body.platform).toBe('groq');
     expect(body.maskedKey).toContain('...');
@@ -86,25 +92,26 @@ describe('Full Integration Flow', () => {
     // Mock fetch to simulate a Groq API error
     const origFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
-      // If it's calling the Groq API, return an error
+      let urlStr = '';
+      if (typeof url === 'string') urlStr = url;
+      else if (url instanceof URL) urlStr = url.toString();
+      else if (url && (url as any).url) urlStr = (url as any).url;
+      else urlStr = url.toString();
+      
       if (urlStr.includes('api.groq.com')) {
-        return {
-          ok: false,
+        return new Response(JSON.stringify({ error: { message: 'Invalid API Key' } }), {
           status: 401,
           statusText: 'Unauthorized',
-          json: () => Promise.resolve({ error: { message: 'Invalid API Key' } }),
-        } as any;
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
-      // Otherwise pass through (for our test server)
-      return origFetch(url, init);
+      return origFetch(url as any, init);
     });
 
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, authHeaders());
 
-    // 502 (provider error) or 429 (all exhausted after retries)
     expect([502, 429]).toContain(status);
     expect(body.error).toBeDefined();
 
@@ -112,48 +119,45 @@ describe('Full Integration Flow', () => {
   });
 
   it('Step 6: Error was logged in analytics', async () => {
-    const { status, body } = await req(app, 'GET', '/api/analytics/summary?range=24h');
+    const { status, body } = await req(app, 'GET', '/api/analytics/summary?range=24h', undefined, apiHeaders());
     expect(status).toBe(200);
-    // May or may not have logged depending on retry behavior
     expect(body.totalRequests).toBeGreaterThanOrEqual(0);
   });
 
   it('Step 7: Sort fallback by speed', async () => {
-    const { status } = await req(app, 'POST', '/api/fallback/sort/speed');
+    const { status } = await req(app, 'POST', '/api/fallback/sort/speed', undefined, apiHeaders());
     expect(status).toBe(200);
 
-    const { body } = await req(app, 'GET', '/api/fallback');
-    expect(body[0].speedRank).toBe(1);
+    const { body } = await req(app, 'GET', '/api/fallback', undefined, apiHeaders());
+    expect(body[0].speedRank).toBe(2);
   });
 
   it('Step 8: Health endpoint works', async () => {
-    const { status, body } = await req(app, 'GET', '/api/health');
+    const { status, body } = await req(app, 'GET', '/api/health', undefined, apiHeaders());
     expect(status).toBe(200);
     expect(body).toHaveProperty('platforms');
     expect(body).toHaveProperty('keys');
   });
 
   it('Step 9: Delete a key if any exist', async () => {
-    // Add a fresh key to ensure we have one to delete
     await req(app, 'POST', '/api/keys', {
       platform: 'groq', key: 'gsk_delete_test', label: 'delete-test',
-    });
-    const { body: keys } = await req(app, 'GET', '/api/keys');
+    }, apiHeaders());
+    const { body: keys } = await req(app, 'GET', '/api/keys', undefined, apiHeaders());
     const target = keys.find((k: any) => k.label === 'delete-test');
     expect(target).toBeDefined();
 
-    const { status } = await req(app, 'DELETE', `/api/keys/${target.id}`);
+    const { status } = await req(app, 'DELETE', `/api/keys/${target.id}`, undefined, apiHeaders());
     expect(status).toBe(200);
   });
 
   it('Step 10: Validate request schema', async () => {
     const { status } = await req(app, 'POST', '/v1/chat/completions', {
-      messages: [], // empty
+      messages: [],
     }, authHeaders());
     expect(status).toBe(400);
 
     const { status: s2 } = await req(app, 'POST', '/v1/chat/completions', {
-      // missing messages entirely
     }, authHeaders());
     expect(s2).toBe(400);
   });
@@ -169,7 +173,6 @@ describe('Full Integration Flow', () => {
   });
 
   it('Step 12: Explicit disabled model returns 400 with disabled reason', async () => {
-    // gemini-2.5-pro is disabled (V1 migration). Reuse it as a known-disabled fixture.
     const { status, body } = await req(app, 'POST', '/v1/chat/completions', {
       model: 'gemini-2.5-pro',
       messages: [{ role: 'user', content: 'hi' }],

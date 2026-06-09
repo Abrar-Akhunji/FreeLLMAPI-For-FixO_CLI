@@ -1,170 +1,192 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import { z } from 'zod';
-import { getDb } from '../db/index.js';
+import { getGlobalModels, getUserFallbackConfig, updateUserFallbackConfig, getUserApiKeys, getUserRequests } from '../db/index.js';
 import { getAllPenalties } from '../services/router.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
 
 export const fallbackRouter = Router();
 
+fallbackRouter.use(authMiddleware);
+
 // Get fallback chain (with dynamic penalties)
-fallbackRouter.get('/', (_req: Request, res: Response) => {
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
-           m.monthly_token_budget
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    ORDER BY fc.priority ASC
-  `).all() as any[];
+fallbackRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const globalModels = await getGlobalModels();
+    const fallbackConfig = await getUserFallbackConfig(uid);
+    const userKeys = await getUserApiKeys(uid);
 
-  // Count enabled keys per platform
-  const keyCounts = db.prepare(`
-    SELECT platform, COUNT(*) as count
-    FROM api_keys WHERE enabled = 1
-    GROUP BY platform
-  `).all() as { platform: string; count: number }[];
-  const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
+    const keyCountMap = new Map<string, number>();
+    for (const key of userKeys) {
+      if (key.enabled) {
+        keyCountMap.set(key.platform, (keyCountMap.get(key.platform) || 0) + 1);
+      }
+    }
 
-  // Get current dynamic penalties
-  const penalties = getAllPenalties();
-  const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
+    const penalties = getAllPenalties();
+    const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
 
-  res.json(rows.map(r => {
-    const penalty = penaltyMap.get(r.model_db_id);
-    return {
-      modelDbId: r.model_db_id,
-      priority: r.priority,
-      effectivePriority: r.priority + (penalty?.penalty ?? 0),
-      penalty: penalty?.penalty ?? 0,
-      rateLimitHits: penalty?.count ?? 0,
-      enabled: r.enabled === 1,
-      platform: r.platform,
-      modelId: r.model_id,
-      displayName: r.display_name,
-      intelligenceRank: r.intelligence_rank,
-      speedRank: r.speed_rank,
-      sizeLabel: r.size_label,
-      rpmLimit: r.rpm_limit,
-      rpdLimit: r.rpd_limit,
-      monthlyTokenBudget: r.monthly_token_budget,
-      keyCount: keyCountMap.get(r.platform) ?? 0,
-    };
-  }));
+    const modelMap = new Map(globalModels.map(m => [m.id, m]));
+
+    const result = fallbackConfig.map(f => {
+      const m = modelMap.get(f.modelDbId);
+      const penalty = penaltyMap.get(f.modelDbId);
+
+      return {
+        modelDbId: f.modelDbId,
+        priority: f.priority,
+        effectivePriority: f.priority + (penalty?.penalty ?? 0),
+        penalty: penalty?.penalty ?? 0,
+        rateLimitHits: penalty?.count ?? 0,
+        enabled: f.enabled,
+        platform: m ? m.platform : 'unknown',
+        modelId: m ? m.modelId : 'unknown',
+        displayName: m ? m.displayName : 'unknown',
+        intelligenceRank: m ? m.intelligenceRank : 99,
+        speedRank: m ? m.speedRank : 99,
+        sizeLabel: m ? m.sizeLabel : 'unknown',
+        rpmLimit: m ? m.rpmLimit : null,
+        rpdLimit: m ? m.rpdLimit : null,
+        monthlyTokenBudget: m ? m.monthlyTokenBudget : 'unknown',
+        keyCount: m ? (keyCountMap.get(m.platform) ?? 0) : 0,
+      };
+    });
+
+    result.sort((a, b) => a.priority - b.priority);
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching fallback config:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 const updateSchema = z.array(z.object({
-  modelDbId: z.number(),
+  modelDbId: z.string(),
   priority: z.number(),
   enabled: z.boolean(),
 }));
 
 // Update fallback chain (full replace)
-fallbackRouter.put('/', (req: Request, res: Response) => {
+fallbackRouter.put('/', async (req: AuthenticatedRequest, res: Response) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
 
-  const db = getDb();
-  const update = db.prepare(`
-    UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
-  `);
-
-  const updateAll = db.transaction(() => {
-    for (const entry of parsed.data) {
-      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
-    }
-  });
-  updateAll();
-
-  res.json({ success: true });
+  try {
+    const uid = req.user!.uid;
+    await updateUserFallbackConfig(uid, parsed.data);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating fallback config:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
-// Sort presets — `orderBy` is selected from a fixed whitelist, never from
-// user input directly, so the interpolation below is safe.
 const SORT_PRESETS: Record<string, string> = {
-  intelligence: 'm.intelligence_rank ASC',
-  speed: 'm.speed_rank ASC',
-  budget: "CASE m.monthly_token_budget WHEN '~120M' THEN 1 WHEN '~50-100M' THEN 2 WHEN '~30M' THEN 3 WHEN '~18-45M' THEN 4 WHEN '~18M' THEN 5 WHEN '~15M' THEN 6 WHEN '~12M' THEN 7 WHEN '~6M' THEN 8 WHEN '~5-10M' THEN 9 WHEN '~4M' THEN 10 ELSE 11 END ASC",
+  intelligence: 'intelligenceRank',
+  speed: 'speedRank',
 };
 
-fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
+// Sort preset
+fallbackRouter.post('/sort/:preset', async (req: AuthenticatedRequest, res: Response) => {
   const preset = String(req.params.preset);
-  const orderBy = SORT_PRESETS[preset];
-  if (!orderBy) {
+  const sortKey = SORT_PRESETS[preset];
+  if (!sortKey && preset !== 'budget') {
     res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget` } });
     return;
   }
 
-  const db = getDb();
-  const models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
+  try {
+    const uid = req.user!.uid;
+    const globalModels = await getGlobalModels();
 
-  const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
-  const reorder = db.transaction(() => {
-    for (let i = 0; i < models.length; i++) {
-      update.run(i + 1, models[i].id);
+    if (preset === 'budget') {
+      const budgetOrder = (s: string) => {
+        switch (s) {
+          case '~120M': return 1;
+          case '~50-100M': return 2;
+          case '~30M': return 3;
+          case '~18-45M': return 4;
+          case '~18M': return 5;
+          case '~15M': return 6;
+          case '~12M': return 7;
+          case '~6M': return 8;
+          case '~5-10M': return 9;
+          case '~4M': return 10;
+          default: return 11;
+        }
+      };
+      globalModels.sort((a, b) => budgetOrder(a.monthlyTokenBudget) - budgetOrder(b.monthlyTokenBudget));
+    } else {
+      globalModels.sort((a, b) => {
+        const valA = (a as any)[sortKey] ?? 99;
+        const valB = (b as any)[sortKey] ?? 99;
+        return valA - valB;
+      });
     }
-  });
-  reorder();
 
-  res.json({ success: true, preset });
+    const newChain = globalModels.map((m, index) => ({
+      modelDbId: m.id,
+      priority: index + 1,
+      enabled: m.enabled
+    }));
+
+    await updateUserFallbackConfig(uid, newChain);
+    res.json({ success: true, preset });
+  } catch (error) {
+    console.error('Error sorting fallback config:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Token usage per model for the stacked bar
-fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
-  const db = getDb();
+fallbackRouter.get('/token-usage', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const globalModels = await getGlobalModels();
+    const fallbackConfig = await getUserFallbackConfig(uid);
+    const userKeys = await getUserApiKeys(uid);
 
-  // Get platforms that have enabled keys
-  const platforms = db.prepare(`
-    SELECT DISTINCT ak.platform
-    FROM api_keys ak
-    WHERE ak.enabled = 1
-  `).all() as { platform: string }[];
-  const platformSet = new Set(platforms.map(p => p.platform));
+    const platformSet = new Set(userKeys.filter(k => k.enabled).map(k => k.platform));
 
-  // Get monthly budget per model, ordered by fallback priority
-  const models = db.prepare(`
-    SELECT m.platform, m.model_id, m.display_name, m.monthly_token_budget,
-           fc.priority
-    FROM models m
-    JOIN fallback_config fc ON fc.model_db_id = m.id
-    WHERE m.enabled = 1
-    ORDER BY fc.priority ASC
-  `).all() as { platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number }[];
+    const fallbackMap = new Map(fallbackConfig.map(f => [f.modelDbId, f]));
+    const enabledModels = globalModels.filter(m => m.enabled && fallbackMap.get(m.id)?.enabled);
 
-  function parseBudget(s: string): number {
-    const m = s.match(/~?([\d.]+)(?:-([\d.]+))?([MK])?/);
-    if (!m) return 0;
-    const high = parseFloat(m[2] ?? m[1]);
-    const unit = m[3] === 'M' ? 1_000_000 : m[3] === 'K' ? 1_000 : 1;
-    return high * unit;
+    function parseBudget(s: string): number {
+      const m = s.match(/~?([\d.]+)(?:-([\d.]+))?([MK])?/);
+      if (!m) return 0;
+      const high = parseFloat(m[2] ?? m[1]);
+      const unit = m[3] === 'M' ? 1_000_000 : m[3] === 'K' ? 1_000 : 1;
+      return high * unit;
+    }
+
+    const modelBudgets = enabledModels
+      .filter(m => platformSet.has(m.platform))
+      .map(m => ({
+        displayName: m.displayName,
+        platform: m.platform,
+        budget: parseBudget(m.monthlyTokenBudget),
+      }));
+
+    const totalBudget = modelBudgets.reduce((s, m) => s + m.budget, 0);
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+    const requests = await getUserRequests(uid, startOfMonth.toISOString());
+    const totalUsed = requests.reduce((sum, r) => sum + r.inputTokens + r.outputTokens, 0);
+
+    res.json({
+      totalBudget,
+      totalUsed,
+      models: modelBudgets,
+    });
+  } catch (error) {
+    console.error('Error getting token usage:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
   }
-
-  // Build per-model breakdown (only platforms with keys)
-  const modelBudgets = models
-    .filter(m => platformSet.has(m.platform))
-    .map(m => ({
-      displayName: m.display_name,
-      platform: m.platform,
-      budget: parseBudget(m.monthly_token_budget),
-    }));
-
-  const totalBudget = modelBudgets.reduce((s, m) => s + m.budget, 0);
-
-  // Tokens used this month
-  const usage = db.prepare(`
-    SELECT
-      COALESCE(SUM(input_tokens + output_tokens), 0) as total_used
-    FROM requests
-    WHERE created_at >= datetime('now', 'start of month')
-  `).get() as { total_used: number };
-
-  res.json({
-    totalBudget,
-    totalUsed: usage.total_used,
-    models: modelBudgets,
-  });
 });

@@ -12,3 +12,9 @@ server/data/
 # Personal deployment scripts (contain keys/credentials — kept local)
 deploy-pi.sh
 update-hermes.sh
+
+# Sensitive credentials & build archives
+fixo-builder-firebase-adminsdk-fbsvc-652e7036dc.json
+Archive.zip
+.fixo/
+temp_opencode/

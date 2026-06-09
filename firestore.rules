@@ -1,0 +1,43 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function to check if the request is for the user's own data
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profile document
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+      
+      // Nested subcollections
+      match /api_keys/{keyId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      match /requests/{requestId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      match /fallback_config/{configId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      match /settings/{settingId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Global models catalog (read-only for authenticated users, write-only for admins)
+    match /global_models/{modelId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Only manageable programmatically via Admin SDK (or Console)
+    }
+  }
+}

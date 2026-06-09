@@ -20,6 +20,7 @@ export type Platform =
   | 'kilo'
   | 'pollinations'
   | 'llm7'
+  | 'zen'
   | 'ollama-local';
 
 export interface Model {

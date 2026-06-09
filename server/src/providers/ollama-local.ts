@@ -1,14 +1,27 @@
 import type { ChatMessage, ChatCompletionResponse, ChatCompletionChunk, Platform, ChatToolCall } from '@freellmapi/shared/types.js';
 import { BaseProvider, CompletionOptions } from './base.js';
-import { getSetting } from '../db/index.js';
+import { firestore } from '../lib/firebaseAdmin.js';
 import { ENV } from '../env.js';
+
+async function getGlobalOllamaUrl(): Promise<string> {
+  try {
+    const doc = await firestore.collection('global_settings').doc('ollama').get();
+    if (doc.exists) {
+      const data = doc.data();
+      if (data && data.url) return data.url;
+    }
+  } catch (err) {
+    console.error('Error fetching global ollama URL:', err);
+  }
+  return ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
+}
 
 export class OllamaLocalProvider extends BaseProvider {
   platform: Platform = 'ollama-local';
   name = 'Ollama Local';
 
   async validateKey(apiKey: string): Promise<boolean> {
-    const baseUrl = getSetting('ollama_local_url') || ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
+    const baseUrl = await getGlobalOllamaUrl();
     try {
       const res = await this.fetchWithTimeout(`${baseUrl}/api/tags`, {}, 5000);
       return res.ok;
@@ -54,7 +67,7 @@ export class OllamaLocalProvider extends BaseProvider {
     modelId: string,
     options?: CompletionOptions,
   ): Promise<ChatCompletionResponse> {
-    const baseUrl = getSetting('ollama_local_url') || ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
+    const baseUrl = await getGlobalOllamaUrl();
     const payload = this.buildPayload(messages, modelId, options, false);
 
     const res = await this.fetchWithTimeout(`${baseUrl}/api/chat`, {
@@ -110,7 +123,7 @@ export class OllamaLocalProvider extends BaseProvider {
     modelId: string,
     options?: CompletionOptions,
   ): AsyncGenerator<ChatCompletionChunk> {
-    const baseUrl = getSetting('ollama_local_url') || ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
+    const baseUrl = await getGlobalOllamaUrl();
     const payload = this.buildPayload(messages, modelId, options, true);
 
     const res = await this.fetchWithTimeout(`${baseUrl}/api/chat`, {

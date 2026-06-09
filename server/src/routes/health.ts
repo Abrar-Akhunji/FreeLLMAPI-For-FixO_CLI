@@ -1,73 +1,117 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
-import { checkKeyHealth, checkAllKeys } from '../services/health.js';
+import type { Response } from 'express';
+import { getUserApiKeys } from '../db/index.js';
+import { checkKeyHealth } from '../services/health.js';
 import { hasProvider } from '../providers/index.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
+import { sanitizeParams } from '../middleware/sanitizeParams.js';
 
 export const healthRouter = Router();
 
+healthRouter.use(authMiddleware);
+
 // Get health status for all platforms
-healthRouter.get('/', (_req: Request, res: Response) => {
-  const db = getDb();
+healthRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const keys = await getUserApiKeys(uid);
 
-  const platforms = db.prepare(`
-    SELECT
-      platform,
-      COUNT(*) as total_keys,
-      SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) as healthy_keys,
-      SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) as rate_limited_keys,
-      SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) as invalid_keys,
-      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_keys,
-      SUM(CASE WHEN status = 'unknown' THEN 1 ELSE 0 END) as unknown_keys,
-      SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled_keys
-    FROM api_keys
-    GROUP BY platform
-  `).all() as any[];
+    const platformStats: Record<string, {
+      platform: string;
+      totalKeys: number;
+      healthyKeys: number;
+      rateLimitedKeys: number;
+      invalidKeys: number;
+      errorKeys: number;
+      unknownKeys: number;
+      enabledKeys: number;
+    }> = {};
 
-  const keys = db.prepare(`
-    SELECT id, platform, label, status, enabled, created_at, last_checked_at
-    FROM api_keys
-    ORDER BY platform, created_at DESC
-  `).all() as any[];
+    for (const k of keys) {
+      const p = k.platform;
+      if (!platformStats[p]) {
+        platformStats[p] = {
+          platform: p,
+          totalKeys: 0,
+          healthyKeys: 0,
+          rateLimitedKeys: 0,
+          invalidKeys: 0,
+          errorKeys: 0,
+          unknownKeys: 0,
+          enabledKeys: 0
+        };
+      }
+      const stats = platformStats[p];
+      stats.totalKeys++;
+      if (k.enabled) stats.enabledKeys++;
+      if (k.status === 'healthy') stats.healthyKeys++;
+      else if (k.status === 'rate_limited') stats.rateLimitedKeys++;
+      else if (k.status === 'invalid') stats.invalidKeys++;
+      else if (k.status === 'error') stats.errorKeys++;
+      else if (k.status === 'unknown') stats.unknownKeys++;
+    }
 
-  res.json({
-    platforms: platforms.map(p => ({
-      platform: p.platform,
-      hasProvider: hasProvider(p.platform),
-      totalKeys: p.total_keys,
-      healthyKeys: p.healthy_keys,
-      rateLimitedKeys: p.rate_limited_keys,
-      invalidKeys: p.invalid_keys,
-      errorKeys: p.error_keys,
-      unknownKeys: p.unknown_keys,
-      enabledKeys: p.enabled_keys,
-    })),
-    keys: keys.map(k => ({
-      id: k.id,
-      platform: k.platform,
-      label: k.label,
-      status: k.status,
-      enabled: k.enabled === 1,
-      createdAt: k.created_at,
-      lastCheckedAt: k.last_checked_at,
-    })),
-  });
+    res.json({
+      platforms: Object.values(platformStats).map(p => ({
+        platform: p.platform,
+        hasProvider: hasProvider(p.platform as any),
+        totalKeys: p.totalKeys,
+        healthyKeys: p.healthyKeys,
+        rateLimitedKeys: p.rateLimitedKeys,
+        invalidKeys: p.invalidKeys,
+        errorKeys: p.errorKeys,
+        unknownKeys: p.unknownKeys,
+        enabledKeys: p.enabledKeys,
+      })),
+      keys: keys.map(k => ({
+        id: k.id,
+        platform: k.platform,
+        label: k.label,
+        status: k.status,
+        enabled: k.enabled,
+        createdAt: k.createdAt,
+        lastCheckedAt: k.lastCheckedAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Error fetching health status:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Check a specific key
-healthRouter.post('/check/:keyId', async (req: Request, res: Response) => {
-  const keyId = parseInt(req.params.keyId as string, 10);
-  if (isNaN(keyId)) {
+healthRouter.post('/check/:keyId', sanitizeParams, async (req: AuthenticatedRequest, res: Response) => {
+  const keyId = req.params.keyId as string;
+  if (!keyId) {
     res.status(400).json({ error: { message: 'Invalid key ID' } });
     return;
   }
 
-  const status = await checkKeyHealth(keyId);
-  res.json({ keyId, status });
+  try {
+    const uid = req.user!.uid;
+    const status = await checkKeyHealth(uid, keyId);
+    res.json({ keyId, status });
+  } catch (error) {
+    console.error('Error checking key health:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Check all keys
-healthRouter.post('/check-all', async (_req: Request, res: Response) => {
-  await checkAllKeys();
-  res.json({ success: true });
+healthRouter.post('/check-all', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const keys = await getUserApiKeys(uid);
+    const enabledKeys = keys.filter(k => k.enabled);
+
+    for (const key of enabledKeys) {
+      await checkKeyHealth(uid, key.id);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error checking all keys health:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });

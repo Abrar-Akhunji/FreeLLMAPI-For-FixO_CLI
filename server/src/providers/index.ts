@@ -27,6 +27,9 @@ register(new OpenAICompatProvider({
   platform: 'cerebras',
   name: 'Cerebras',
   baseUrl: 'https://api.cerebras.ai/v1',
+  extraHeaders: {
+    'X-Cerebras-3rd-Party-Integration': 'opencode',
+  },
 }));
 
 // SambaNova - OpenAI-compatible
@@ -41,6 +44,11 @@ register(new OpenAICompatProvider({
   platform: 'nvidia',
   name: 'NVIDIA NIM',
   baseUrl: 'https://integrate.api.nvidia.com/v1',
+  extraHeaders: {
+    'HTTP-Referer': 'https://opencode.ai/',
+    'X-Title': 'opencode',
+    'X-BILLING-INVOKE-ORIGIN': 'OpenCode',
+  },
 }));
 
 // Mistral - OpenAI-compatible
@@ -56,8 +64,8 @@ register(new OpenAICompatProvider({
   name: 'OpenRouter',
   baseUrl: 'https://openrouter.ai/api/v1',
   extraHeaders: {
-    'HTTP-Referer': 'http://localhost:3001',
-    'X-Title': 'FreeLLMAPI',
+    'HTTP-Referer': 'https://opencode.ai/',
+    'X-Title': 'opencode',
   },
 }));
 
@@ -81,6 +89,17 @@ register(new OpenAICompatProvider({
   platform: 'zhipu',
   name: 'Zhipu AI',
   baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+}));
+
+// Zen (OpenCode) - OpenAI-compatible routed to ZenMux
+register(new OpenAICompatProvider({
+  platform: 'zen',
+  name: 'Zen',
+  baseUrl: 'https://opencode.ai/zen/v1',
+  extraHeaders: {
+    'HTTP-Referer': 'https://opencode.ai/',
+    'X-Title': 'opencode',
+  },
 }));
 
 // Hugging Face, Moonshot, MiniMax direct integrations were dropped in V4 —

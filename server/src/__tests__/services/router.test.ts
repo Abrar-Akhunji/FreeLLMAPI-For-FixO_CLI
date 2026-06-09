@@ -1,129 +1,109 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { initDb, getDb } from '../../db/index.js';
+import { initDb, getGlobalModels, firestore } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { routeRequest } from '../../services/router.js';
 
+async function setupApiKey(platform: string, key: string, status = 'healthy', enabled = true) {
+  const { encrypted, iv, authTag } = encrypt(key);
+  const docRef = firestore.collection('users').doc('test-user-uid').collection('api_keys').doc();
+  await docRef.set({
+    platform,
+    label: 'test',
+    encrypted_key: encrypted,
+    iv,
+    auth_tag: authTag,
+    status,
+    enabled,
+    createdAt: new Date().toISOString(),
+    lastCheckedAt: null
+  });
+}
+
+async function setFallbackPriorities(priorities: { platform: string, priority: number }[]) {
+  const models = await getGlobalModels();
+  const chain = models.map(m => {
+    const override = priorities.find(p => p.platform === m.platform);
+    return {
+      modelDbId: m.id,
+      priority: override ? override.priority : m.intelligenceRank,
+      enabled: m.enabled
+    };
+  });
+  await firestore.collection('users').doc('test-user-uid').collection('fallback_config').doc('default').set({ chain });
+}
+
 describe('Router', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb();
   });
 
-  beforeEach(() => {
-    const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    // Reset fallback order to intelligence ranking
-    const models = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as any[];
-    const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
-    for (let i = 0; i < models.length; i++) {
-      update.run(i + 1, models[i].id);
+  beforeEach(async () => {
+    if ('data' in firestore) {
+      const keys = Object.keys((firestore as any).data);
+      for (const k of keys) {
+        if (!k.startsWith('global_models/')) {
+          delete (firestore as any).data[k];
+        }
+      }
     }
+    // Disable smart routing for test user
+    const { setUserSetting } = await import('../../db/index.js');
+    await setUserSetting('test-user-uid', 'smart_routing', 'false');
   });
 
-  it('should throw when no keys are configured', () => {
-    expect(() => routeRequest()).toThrow(/exhausted/i);
+  it('should throw when no keys are configured', async () => {
+    await expect(routeRequest('test-user-uid')).rejects.toThrow(/exhausted/i);
   });
 
-  it('should route to highest priority model with available key', () => {
-    const db = getDb();
-    const { encrypted, iv, authTag } = encrypt('test-groq-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('groq', 'test', encrypted, iv, authTag, 'healthy', 1);
-
-    const result = routeRequest();
+  it('should route to highest priority model with available key', async () => {
+    await setupApiKey('groq', 'test-groq-key');
+    const result = await routeRequest('test-user-uid');
     expect(result.platform).toBe('groq');
     expect(result.apiKey).toBe('test-groq-key');
   });
 
-  it('should prefer higher-priority model when keys exist for multiple platforms', () => {
-    const db = getDb();
+  it('should prefer higher-priority model when keys exist for multiple platforms', async () => {
+    await setupApiKey('google', 'test-google-key');
+    await setupApiKey('groq', 'test-groq-key');
 
-    const googleKey = encrypt('test-google-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('google', 'test', googleKey.encrypted, googleKey.iv, googleKey.authTag, 'healthy', 1);
-
-    const groqKey = encrypt('test-groq-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
-
-    // Post-V6: Google's gemini-3.1-pro-preview (rank 1, free-tier-eligible per
-    // probe on 2026-04-25) outranks Groq's best free-tier model openai/gpt-oss-120b
-    // (rank 6). With keys for both platforms, Google wins.
-    const result = routeRequest();
+    // Default intelligence ranks: Google (e.g. gemini-2.5-flash / gemini-2.5-pro) wins over groq
+    const result = await routeRequest('test-user-uid');
     expect(result.platform).toBe('google');
   });
 
-  it('should skip disabled keys', () => {
-    const db = getDb();
+  it('should skip disabled keys', async () => {
+    await setupApiKey('google', 'test-google-key', 'healthy', false);
+    await setupApiKey('groq', 'test-groq-key');
 
-    const googleKey = encrypt('test-google-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('google', 'disabled', googleKey.encrypted, googleKey.iv, googleKey.authTag, 'healthy', 0);
-
-    const groqKey = encrypt('test-groq-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
-
-    const result = routeRequest();
+    const result = await routeRequest('test-user-uid');
     expect(result.platform).toBe('groq');
   });
 
-  it('should skip invalid keys', () => {
-    const db = getDb();
+  it('should skip invalid keys', async () => {
+    await setupApiKey('google', 'invalid-key', 'invalid');
+    await setupApiKey('groq', 'test-groq-key');
 
-    const invalidKey = encrypt('invalid-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('google', 'invalid', invalidKey.encrypted, invalidKey.iv, invalidKey.authTag, 'invalid', 1);
-
-    const groqKey = encrypt('test-groq-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
-
-    const result = routeRequest();
+    const result = await routeRequest('test-user-uid');
     expect(result.platform).toBe('groq');
   });
 
-  it('should skip non-tool-capable models when requiresTools is true', () => {
-    const db = getDb();
+  it('should skip non-tool-capable models when requiresTools is true', async () => {
+    await setupApiKey('cohere', 'test-cohere-key');
+    await setupApiKey('groq', 'test-groq-key');
 
-    // Cohere is not in the tool-capable list
-    const cohereKey = encrypt('test-cohere-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('cohere', 'test', cohereKey.encrypted, cohereKey.iv, cohereKey.authTag, 'healthy', 1);
-
-    // Groq is in the tool-capable list
-    const groqKey = encrypt('test-groq-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
-
-    // Set fallback priorities
-    db.prepare("UPDATE fallback_config SET priority = 1 WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'cohere')").run();
-    db.prepare("UPDATE fallback_config SET priority = 2 WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'groq')").run();
+    // Give cohere higher priority
+    await setFallbackPriorities([
+      { platform: 'cohere', priority: 1 },
+      { platform: 'groq', priority: 2 }
+    ]);
 
     // Without requiresTools, Cohere should be routed
-    const normalResult = routeRequest();
+    const normalResult = await routeRequest('test-user-uid');
     expect(normalResult.platform).toBe('cohere');
 
     // With requiresTools, Cohere should be skipped and Groq selected
-    const toolResult = routeRequest(1000, 0, undefined, undefined, true);
+    const toolResult = await routeRequest('test-user-uid', 1000, 0, undefined, undefined, true);
     expect(toolResult.platform).toBe('groq');
   });
 });

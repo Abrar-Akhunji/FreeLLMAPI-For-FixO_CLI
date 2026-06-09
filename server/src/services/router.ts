@@ -1,76 +1,35 @@
-import { getDb, getSetting } from '../db/index.js';
+import { getGlobalModels, getUserFallbackConfig, getUserApiKeys, getUserSetting } from '../db/index.js';
 import { ENV } from '../env.js';
 import { getProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { canMakeRequest, canUseTokens, isOnCooldown } from './ratelimit.js';
 import type { BaseProvider } from '../providers/base.js';
 
-interface ModelRow {
-  id: number;
-  platform: string;
-  model_id: string;
-  display_name: string;
-  intelligence_rank: number;
-  speed_rank: number;
-  rpm_limit: number | null;
-  rpd_limit: number | null;
-  tpm_limit: number | null;
-  tpd_limit: number | null;
-  context_window: number | null;
-}
-
-interface KeyRow {
-  id: number;
-  platform: string;
-  encrypted_key: string;
-  iv: string;
-  auth_tag: string;
-  status: string;
-  enabled: number;
-}
-
-interface FallbackRow {
-  model_db_id: number;
-  priority: number;
-  enabled: number;
-}
-
 export interface RouteResult {
   provider: BaseProvider;
   modelId: string;
-  modelDbId: number;
+  modelDbId: string;
   apiKey: string;
-  keyId: number;
+  keyId: string;
   platform: string;
   displayName: string;
 }
 
-// Round-robin index per platform
+// Round-robin index per user-platform-model key
 const roundRobinIndex = new Map<string, number>();
 
 // Cache smart routing setting
-let isSmartRoutingEnabled = false;
-setInterval(() => {
-  try {
-    const val = getSetting('smart_routing') ?? ENV.SMART_ROUTING_ENABLED;
-    if (val !== undefined) isSmartRoutingEnabled = val === 'true';
-  } catch (e) { /* ignore until DB is ready */ }
-}, 60000);
+let isSmartRoutingEnabled = true;
 
 // ── Dynamic priority: track 429s per model and demote accordingly ──
-// Key: model_db_id → { count, lastHit, penalty }
-const rateLimitPenalties = new Map<number, { count: number; lastHit: number; penalty: number }>();
+const rateLimitPenalties = new Map<string, { count: number; lastHit: number; penalty: number }>();
 
-// Penalty decays over time so models recover
-const PENALTY_PER_429 = 3;        // each 429 adds this many priority positions
-const MAX_PENALTY = 10;            // cap so a model doesn't sink forever
-const DECAY_INTERVAL_MS = 2 * 60 * 1000; // penalty decays every 2 minutes
-const DECAY_AMOUNT = 1;            // remove this much penalty per decay interval
+const PENALTY_PER_429 = 3;
+const MAX_PENALTY = 10;
+const DECAY_INTERVAL_MS = 2 * 60 * 1000;
+const DECAY_AMOUNT = 1;
 
-/**
- * Record a 429 for a model — increases its penalty so it sinks in priority.
- */
-export function recordRateLimitHit(modelDbId: number) {
+export function recordRateLimitHit(modelDbId: string) {
   const existing = rateLimitPenalties.get(modelDbId);
   const now = Date.now();
   if (existing) {
@@ -82,10 +41,7 @@ export function recordRateLimitHit(modelDbId: number) {
   }
 }
 
-/**
- * Record a success for a model — reduces its penalty so it rises back up.
- */
-export function recordSuccess(modelDbId: number) {
+export function recordSuccess(modelDbId: string) {
   const existing = rateLimitPenalties.get(modelDbId);
   if (existing) {
     existing.penalty = Math.max(0, existing.penalty - 1);
@@ -95,20 +51,16 @@ export function recordSuccess(modelDbId: number) {
   }
 }
 
-/**
- * Get the current penalty for a model (with time-based decay).
- */
-function getPenalty(modelDbId: number): number {
+function getPenalty(modelDbId: string): number {
   const entry = rateLimitPenalties.get(modelDbId);
   if (!entry) return 0;
 
-  // Apply time-based decay
   const now = Date.now();
   const elapsed = now - entry.lastHit;
   const decaySteps = Math.floor(elapsed / DECAY_INTERVAL_MS);
   if (decaySteps > 0) {
     entry.penalty = Math.max(0, entry.penalty - (decaySteps * DECAY_AMOUNT));
-    entry.lastHit = now; // reset so we don't double-decay
+    entry.lastHit = now;
     if (entry.penalty === 0) {
       rateLimitPenalties.delete(modelDbId);
       return 0;
@@ -118,11 +70,8 @@ function getPenalty(modelDbId: number): number {
   return entry.penalty;
 }
 
-/**
- * Get current penalties for all models (for the API/dashboard).
- */
-export function getAllPenalties(): Array<{ modelDbId: number; count: number; penalty: number }> {
-  const result: Array<{ modelDbId: number; count: number; penalty: number }> = [];
+export function getAllPenalties(): Array<{ modelDbId: string; count: number; penalty: number }> {
+  const result: Array<{ modelDbId: string; count: number; penalty: number }> = [];
   for (const [modelDbId, entry] of rateLimitPenalties) {
     const penalty = getPenalty(modelDbId);
     if (penalty > 0) {
@@ -132,146 +81,131 @@ export function getAllPenalties(): Array<{ modelDbId: number; count: number; pen
   return result.sort((a, b) => b.penalty - a.penalty);
 }
 
-/**
- * Helper to check if a model supports tool calling natively.
- */
 function isToolCapable(platform: string, modelId: string): boolean {
   const id = modelId.toLowerCase();
   if (platform === 'google' || id.includes('gemini')) return true;
-  if (id.includes('llama-3.3') || id.includes('llama-v3p3') || id.includes('llama-3.3-70b')) return true;
-  if (platform === 'mistral' && (id.includes('large') || id.includes('codestral') || id.includes('medium') || id.includes('devstral'))) return true;
-  if (id.includes('deepseek-v3')) return true;
+  if (id.includes('gpt-4o') || id.includes('gpt-4.1') || id.includes('gpt-5')) return true;
+  if (id.includes('gpt-oss')) return true;
+  if (id.includes('llama-3.3') || id.includes('llama-v3p3') || id.includes('llama3.3')) return true;
+  if (id.includes('llama-4') || id.includes('llama4')) return true;
+  if (platform === 'mistral' && (id.includes('large') || id.includes('codestral') || id.includes('medium') || id.includes('devstral') || id.includes('magistral'))) return true;
+  if (id.includes('deepseek-v3') || id.includes('deepseek/deepseek-v3') || id.includes('deepseek-v3.1') || id.includes('deepseek-v3.2')) return true;
   if (id.includes('qwen3-coder') || id.includes('qwen-3-coder')) return true;
-  if (id.includes('minimax-m2.5')) return true;
-  if (id.includes('gpt-4o') || id.includes('gpt-4.1')) return true;
+  if (id.includes('qwen3') || id.includes('qwen-3')) return true;
+  if (id.includes('minimax') || id.includes('m2.5') || id.includes('m2.7') || id.includes('m3-free')) return true;
+  if (id.includes('kimi-k2') || id.includes('kimi_k2')) return true;
+  if (id.includes('glm-4') || id.includes('glm4')) return true;
+  if (id.includes('nemotron-3-super') || id.includes('nemotron-super')) return true;
+  if (platform === 'sambanova' && (id.includes('deepseek') || id.includes('llama-4') || id.includes('gpt-oss'))) return true;
+  if (platform === 'groq' && (id.includes('gpt-oss') || id.includes('compound'))) return true;
+  if (platform === 'cloudflare' && (
+    id.includes('llama-3.3') || id.includes('llama-4') ||
+    id.includes('kimi-k2') || id.includes('gpt-oss') || id.includes('glm-4')
+  )) return true;
+  if (platform === 'cerebras' && id.includes('qwen')) return true;
   return false;
 }
 
-/**
- * Route a request to the best available model.
- * Models are sorted by (base_priority + rate_limit_penalty) so frequently
- * rate-limited models automatically sink below working ones.
- *
- * If preferredModelDbId is set, that model gets tried FIRST (sticky sessions).
- * This prevents hallucination from model switching mid-conversation.
- *
- * @param estimatedTokens - estimated total tokens for rate limit check
- * @param estimatedInputTokens - estimated input tokens for context window checks
- * @param skipKeys - set of "platform:modelId:keyId" to skip (failed on this request)
- * @param preferredModelDbId - try this model first (sticky session)
- * @param requiresTools - filter out models that do not natively execute valid OpenAI tool-calling formats
- */
-export function routeRequest(estimatedTokens = 1000, estimatedInputTokens = 0, skipKeys?: Set<string>, preferredModelDbId?: number, requiresTools?: boolean): RouteResult {
-  const db = getDb();
+export async function routeRequest(
+  uid: string,
+  estimatedTokens = 1000,
+  estimatedInputTokens = 0,
+  skipKeys?: Set<string>,
+  preferredModelDbId?: string,
+  requiresTools?: boolean
+): Promise<RouteResult> {
+  const globalModels = await getGlobalModels();
+  const fallbackConfig = await getUserFallbackConfig(uid);
 
-  // Get fallback chain ordered by priority, joined with models for smart routing
-  const fallbackChain = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled, m.intelligence_rank, m.speed_rank, m.context_window
-    FROM fallback_config fc
-    JOIN models m ON fc.model_db_id = m.id
-    ORDER BY fc.priority ASC
-  `).all() as (FallbackRow & { intelligence_rank: number; speed_rank: number; context_window: number | null })[];
+  const modelMap = new Map(globalModels.map(m => [m.id, m]));
 
-  // Apply dynamic penalties and smart routing boosts: sort by effective priority
-  const sortedChain = fallbackChain.map(entry => {
-    let effectivePriority = entry.priority + getPenalty(entry.model_db_id);
+  const smartRoutingVal = await getUserSetting(uid, 'smart_routing');
+  isSmartRoutingEnabled = (smartRoutingVal ?? ENV.SMART_ROUTING_ENABLED) === 'true';
+
+  const sortedChain = fallbackConfig.map(entry => {
+    let effectivePriority = entry.priority + getPenalty(entry.modelDbId);
     
-    // Feature A: Smart routing bonus
     if (isSmartRoutingEnabled && !preferredModelDbId) {
-      if (estimatedInputTokens < 500 && entry.speed_rank <= 5) {
-        effectivePriority -= 50; // Boost fast models for short prompts
-      } else if (estimatedInputTokens > 5000 && entry.intelligence_rank <= 10) {
-        effectivePriority -= 50; // Boost smart models for long prompts
+      const model = modelMap.get(entry.modelDbId);
+      if (model) {
+        if (estimatedInputTokens < 500 && model.speedRank <= 5) {
+          effectivePriority -= 50;
+        } else if (estimatedInputTokens > 5000 && model.intelligenceRank <= 10) {
+          effectivePriority -= 50;
+        }
       }
     }
     
     return { ...entry, effectivePriority };
   }).sort((a, b) => a.effectivePriority - b.effectivePriority);
 
-  // Sticky session: move preferred model to front of chain
   if (preferredModelDbId) {
-    const idx = sortedChain.findIndex(e => e.model_db_id === preferredModelDbId);
+    const idx = sortedChain.findIndex(e => e.modelDbId === preferredModelDbId);
     if (idx > 0) {
       const [preferred] = sortedChain.splice(idx, 1);
       sortedChain.unshift(preferred);
     }
   }
 
+  const userKeys = await getUserApiKeys(uid);
+
   for (const entry of sortedChain) {
     if (!entry.enabled) continue;
 
-    // Feature A: Context window filter
-    if (entry.context_window && estimatedInputTokens > entry.context_window * 0.9) {
-      continue; // Skip models that can't fit this prompt
-    }
+    const model = modelMap.get(entry.modelDbId);
+    if (!model || !model.enabled) continue;
 
-    // Get model details
-    const model = db.prepare('SELECT * FROM models WHERE id = ? AND enabled = 1').get(entry.model_db_id) as ModelRow | undefined;
-    if (!model) continue;
-
-    // Filter out models that do not natively execute valid OpenAI tool-calling formats
-    if (requiresTools && !isToolCapable(model.platform, model.model_id)) {
+    if (model.contextWindow && estimatedInputTokens > model.contextWindow * 0.9) {
       continue;
     }
 
-    // Check if we have a provider for this platform
+    if (requiresTools && !isToolCapable(model.platform, model.modelId)) {
+      continue;
+    }
+
     const provider = getProvider(model.platform as any);
     if (!provider) continue;
 
-    // Get all healthy, enabled keys for this platform
-    const keys = db.prepare(
-      'SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status != ?'
-    ).all(model.platform, 'invalid') as KeyRow[];
+    const platformKeys = userKeys.filter(k => k.platform === model.platform && k.enabled && k.status !== 'invalid');
+    if (platformKeys.length === 0) continue;
 
-    if (keys.length === 0) continue;
-
-    // Get limits once for this model
     const limits = {
-      rpm: model.rpm_limit,
-      rpd: model.rpd_limit,
-      tpm: model.tpm_limit,
-      tpd: model.tpd_limit,
+      rpm: model.rpmLimit,
+      rpd: model.rpdLimit,
+      tpm: model.tpmLimit,
+      tpd: model.tpdLimit,
     };
 
-    // Try all keys for this model before giving up on it
-    const rrKey = `${model.platform}:${model.model_id}`;
+    const rrKey = `${uid}:${model.platform}:${model.modelId}`;
     let idx = roundRobinIndex.get(rrKey) ?? 0;
 
-    for (let attempt = 0; attempt < keys.length; attempt++) {
-      const key = keys[idx % keys.length];
+    for (let attempt = 0; attempt < platformKeys.length; attempt++) {
+      const key = platformKeys[idx % platformKeys.length];
       idx++;
 
-      const skipId = `${model.platform}:${model.model_id}:${key.id}`;
+      const skipId = `${model.platform}:${model.modelId}:${key.id}`;
       if (skipKeys?.has(skipId)) continue;
 
-      // Check cooldown (from previous 429s)
-      if (isOnCooldown(model.platform, model.model_id, key.id)) continue;
+      if (isOnCooldown(model.platform, model.modelId, key.id)) continue;
 
-      if (!canMakeRequest(model.platform, model.model_id, key.id, limits)) continue;
-      if (!canUseTokens(model.platform, model.model_id, key.id, estimatedTokens, limits)) continue;
+      if (!canMakeRequest(model.platform, model.modelId, key.id, limits)) continue;
+      if (!canUseTokens(model.platform, model.modelId, key.id, estimatedTokens, limits)) continue;
 
-      // We found a working key for this model!
       roundRobinIndex.set(rrKey, idx);
       const decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
 
       return {
         provider,
-        modelId: model.model_id,
+        modelId: model.modelId,
         modelDbId: model.id,
         apiKey: decryptedKey,
         keyId: key.id,
         platform: model.platform,
-        displayName: model.display_name,
+        displayName: model.displayName,
       };
     }
 
-    // If we reach here, this specific model has NO available keys.
-    // Update round-robin index even if we failed so we don't get stuck.
     roundRobinIndex.set(rrKey, idx);
-    
-    // We don't explicitly penalize the model here because the fact that we 
-    // couldn't find a key means we will naturally move to the next model 
-    // in the `sortedChain` for THIS specific request.
   }
 
   const err = new Error('All models exhausted. Add more API keys or wait for rate limits to reset.') as any;

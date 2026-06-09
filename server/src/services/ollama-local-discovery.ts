@@ -1,16 +1,35 @@
-import { getDb, getSetting } from '../db/index.js';
+import { firestore } from '../lib/firebaseAdmin.js';
 import { ENV } from '../env.js';
 
 export async function discoverOllamaModels() {
-  const isEnabled = (getSetting('ollama_local_enabled') ?? ENV.OLLAMA_LOCAL_ENABLED) === 'true';
-  const db = getDb();
+  const settingsRef = firestore.collection('global_settings').doc('ollama');
+  const settingsDoc = await settingsRef.get();
+  
+  let isEnabled = ENV.OLLAMA_LOCAL_ENABLED === 'true';
+  let baseUrl = ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
 
-  if (!isEnabled) {
-    db.prepare("UPDATE models SET enabled = 0 WHERE platform = 'ollama-local'").run();
-    return;
+  if (settingsDoc.exists) {
+    const data = settingsDoc.data();
+    if (data) {
+      if (data.enabled !== undefined) isEnabled = data.enabled === 'true' || data.enabled === true;
+      if (data.url) baseUrl = data.url;
+    }
   }
 
-  const baseUrl = getSetting('ollama_local_url') || ENV.OLLAMA_LOCAL_URL || 'http://localhost:11434';
+  const modelsColl = firestore.collection('global_models');
+
+  if (!isEnabled) {
+    // Disable all local ollama models in global catalog
+    const snapshot = await modelsColl.where('platform', '==', 'ollama-local').get();
+    if (!snapshot.empty) {
+      const batch = firestore.batch();
+      for (const doc of snapshot.docs) {
+        batch.update(doc.ref, { enabled: false });
+      }
+      await batch.commit();
+    }
+    return;
+  }
 
   try {
     const controller = new AbortController();
@@ -18,49 +37,66 @@ export async function discoverOllamaModels() {
     const res = await fetch(`${baseUrl}/api/tags`, { signal: controller.signal });
     clearTimeout(timeout);
 
-    if (!res.ok) throw new Error('Not OK');
+    if (!res.ok) throw new Error('Ollama connection not OK');
 
     const data = await res.json() as any;
     const models = data.models || [];
 
-    const existingModels = db.prepare("SELECT model_id FROM models WHERE platform = 'ollama-local'").all() as { model_id: string }[];
-    const existingSet = new Set(existingModels.map(m => m.model_id));
+    // Fetch existing local models
+    const snapshot = await modelsColl.where('platform', '==', 'ollama-local').get();
+    const existingMap = new Map(snapshot.docs.map((doc: any) => {
+      const d = doc.data();
+      return [d.modelId, doc.id];
+    }));
 
-    const insertModel = db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled)
-      VALUES ('ollama-local', ?, ?, 50, 5, 'Local', 'Unlimited', 1)
-    `);
-    const updateModel = db.prepare("UPDATE models SET enabled = 1 WHERE platform = 'ollama-local' AND model_id = ?");
+    const batch = firestore.batch();
+    
+    // First disable all existing local models in batch
+    for (const doc of snapshot.docs) {
+      batch.update(doc.ref, { enabled: false });
+    }
 
-    db.transaction(() => {
-      // First disable all local models, then re-enable the ones we find
-      db.prepare("UPDATE models SET enabled = 0 WHERE platform = 'ollama-local'").run();
-
-      for (const m of models) {
-        if (existingSet.has(m.name)) {
-          updateModel.run(m.name);
-        } else {
-          insertModel.run(m.name, m.name + ' (Local)');
-        }
+    // Insert or enable the discovered ones
+    for (const m of models) {
+      const modelId = m.name;
+      const existingId = existingMap.get(modelId);
+      if (existingId) {
+        batch.update(modelsColl.doc(existingId), { enabled: true });
+      } else {
+        const id = `ollama-local_${modelId.replace(/\//g, '_')}`;
+        const newModel = {
+          id,
+          platform: 'ollama-local',
+          modelId,
+          displayName: `${modelId} (Local)`,
+          intelligenceRank: 50,
+          speedRank: 5,
+          sizeLabel: 'Local',
+          rpmLimit: null,
+          rpdLimit: null,
+          tpmLimit: null,
+          tpdLimit: null,
+          monthlyTokenBudget: 'Unlimited',
+          contextWindow: 8192,
+          enabled: true
+        };
+        batch.set(modelsColl.doc(id), newModel);
       }
-      
-      const missingFb = db.prepare(`
-        SELECT m.id FROM models m
-        LEFT JOIN fallback_config f ON m.id = f.model_db_id
-        WHERE m.platform = 'ollama-local' AND f.id IS NULL
-      `).all() as { id: number }[];
-
-      if (missingFb.length > 0) {
-        const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
-        const addFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
-        for (let i = 0; i < missingFb.length; i++) {
-          addFb.run(missingFb[i].id, maxPriority + i + 1);
-        }
-      }
-    })();
+    }
+    
+    await batch.commit();
 
   } catch (err) {
-    db.prepare("UPDATE models SET enabled = 0 WHERE platform = 'ollama-local'").run();
+    console.error('[Ollama Discovery] Error scanning local Ollama:', err);
+    // Disable all local ollama models on failure
+    const snapshot = await modelsColl.where('platform', '==', 'ollama-local').get();
+    if (!snapshot.empty) {
+      const batch = firestore.batch();
+      for (const doc of snapshot.docs) {
+        batch.update(doc.ref, { enabled: false });
+      }
+      await batch.commit();
+    }
   }
 }
 
@@ -68,8 +104,16 @@ let intervalId: NodeJS.Timeout | null = null;
 
 export function startOllamaDiscovery() {
   if (intervalId) return;
+  console.log('[Ollama Discovery] Starting local discovery service...');
   discoverOllamaModels().catch(console.error);
   intervalId = setInterval(() => {
     discoverOllamaModels().catch(console.error);
   }, 5 * 60 * 1000); // 5 minutes
+}
+
+export function stopOllamaDiscovery() {
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
 }

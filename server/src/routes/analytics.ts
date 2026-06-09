@@ -1,11 +1,13 @@
 import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
+import type { Response } from 'express';
+import { getUserRequests, getGlobalModels } from '../db/index.js';
+import { authMiddleware } from '../middleware/authMiddleware.js';
+import type { AuthenticatedRequest } from '../middleware/authMiddleware.js';
 
 export const analyticsRouter = Router();
 
-// Map range to a JS-computed ISO timestamp passed as a bind parameter,
-// so the SQL string never includes user-controlled fragments.
+analyticsRouter.use(authMiddleware);
+
 function getSinceTimestamp(range: string): string {
   const now = Date.now();
   switch (range) {
@@ -20,219 +22,346 @@ function getSinceTimestamp(range: string): string {
 }
 
 // Summary stats
-analyticsRouter.get('/summary', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+analyticsRouter.get('/summary', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const since = getSinceTimestamp(range);
 
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as total_requests,
-      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
-      SUM(input_tokens) as total_input_tokens,
-      SUM(output_tokens) as total_output_tokens,
-      AVG(latency_ms) as avg_latency_ms
-    FROM requests
-    WHERE created_at >= ?
-  `).get(since) as any;
+    const requests = await getUserRequests(uid, since);
 
-  const totalRequests = stats.total_requests ?? 0;
-  const successRate = totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
-  const totalTokens = (stats.total_input_tokens ?? 0) + (stats.total_output_tokens ?? 0);
+    const totalRequests = requests.length;
+    const successCount = requests.filter(r => r.status === 'success').length;
+    const successRate = totalRequests > 0 ? (successCount / totalRequests) * 100 : 0;
+    
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalLatency = 0;
 
-  // Estimate cost savings: average ~$3/M input + $15/M output tokens (GPT-4o pricing)
-  const inputCost = ((stats.total_input_tokens ?? 0) / 1_000_000) * 3;
-  const outputCost = ((stats.total_output_tokens ?? 0) / 1_000_000) * 15;
+    for (const r of requests) {
+      totalInputTokens += r.inputTokens || 0;
+      totalOutputTokens += r.outputTokens || 0;
+      totalLatency += r.latencyMs || 0;
+    }
 
-  res.json({
-    totalRequests,
-    successRate: Math.round(successRate * 10) / 10,
-    totalInputTokens: stats.total_input_tokens ?? 0,
-    totalOutputTokens: stats.total_output_tokens ?? 0,
-    avgLatencyMs: Math.round(stats.avg_latency_ms ?? 0),
-    estimatedCostSavings: Math.round((inputCost + outputCost) * 100) / 100,
-  });
+    const avgLatencyMs = totalRequests > 0 ? totalLatency / totalRequests : 0;
+    const inputCost = (totalInputTokens / 1_000_000) * 3;
+    const outputCost = (totalOutputTokens / 1_000_000) * 15;
+
+    res.json({
+      totalRequests,
+      successRate: Math.round(successRate * 10) / 10,
+      totalInputTokens,
+      totalOutputTokens,
+      avgLatencyMs: Math.round(avgLatencyMs),
+      estimatedCostSavings: Math.round((inputCost + outputCost) * 100) / 100,
+    });
+  } catch (error) {
+    console.error('Error fetching analytics summary:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Stats grouped by model
-analyticsRouter.get('/by-model', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+analyticsRouter.get('/by-model', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const since = getSinceTimestamp(range);
 
-  const rows = db.prepare(`
-    SELECT
-      r.platform,
-      r.model_id,
-      m.display_name,
-      COUNT(*) as requests,
-      SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
-      AVG(r.latency_ms) as avg_latency_ms,
-      SUM(r.input_tokens) as total_input_tokens,
-      SUM(r.output_tokens) as total_output_tokens
-    FROM requests r
-    LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
-    WHERE r.created_at >= ?
-    GROUP BY r.platform, r.model_id
-    ORDER BY requests DESC
-  `).all(since) as any[];
+    const requests = await getUserRequests(uid, since);
+    const globalModels = await getGlobalModels();
 
-  res.json(rows.map(r => ({
-    platform: r.platform,
-    modelId: r.model_id,
-    displayName: r.display_name ?? r.model_id,
-    requests: r.requests,
-    successRate: Math.round(r.success_rate * 10) / 10,
-    avgLatencyMs: Math.round(r.avg_latency_ms),
-    totalInputTokens: r.total_input_tokens ?? 0,
-    totalOutputTokens: r.total_output_tokens ?? 0,
-  })));
+    const modelMap = new Map(globalModels.map(m => [`${m.platform}_${m.modelId}`, m.displayName]));
+
+    const groups: Record<string, {
+      platform: string;
+      modelId: string;
+      displayName: string;
+      requests: number;
+      successCount: number;
+      totalLatency: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+    }> = {};
+
+    for (const r of requests) {
+      const key = `${r.platform}_${r.modelId}`;
+      if (!groups[key]) {
+        groups[key] = {
+          platform: r.platform,
+          modelId: r.modelId,
+          displayName: modelMap.get(key) || r.modelId,
+          requests: 0,
+          successCount: 0,
+          totalLatency: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+        };
+      }
+      const g = groups[key];
+      g.requests++;
+      if (r.status === 'success') g.successCount++;
+      g.totalLatency += r.latencyMs || 0;
+      g.totalInputTokens += r.inputTokens || 0;
+      g.totalOutputTokens += r.outputTokens || 0;
+    }
+
+    const rows = Object.values(groups).map(g => ({
+      platform: g.platform,
+      modelId: g.modelId,
+      displayName: g.displayName,
+      requests: g.requests,
+      successRate: Math.round((g.successCount / g.requests) * 100 * 10) / 10,
+      avgLatencyMs: Math.round(g.totalLatency / g.requests),
+      totalInputTokens: g.totalInputTokens,
+      totalOutputTokens: g.totalOutputTokens,
+    }));
+
+    rows.sort((a, b) => b.requests - a.requests);
+
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching analytics by-model:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Stats grouped by platform
-analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+analyticsRouter.get('/by-platform', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const since = getSinceTimestamp(range);
 
-  const rows = db.prepare(`
-    SELECT
-      platform,
-      COUNT(*) as requests,
-      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
-      AVG(latency_ms) as avg_latency_ms,
-      SUM(input_tokens) as total_input_tokens,
-      SUM(output_tokens) as total_output_tokens
-    FROM requests
-    WHERE created_at >= ?
-    GROUP BY platform
-    ORDER BY requests DESC
-  `).all(since) as any[];
+    const requests = await getUserRequests(uid, since);
 
-  res.json(rows.map(r => ({
-    platform: r.platform,
-    requests: r.requests,
-    successRate: Math.round(r.success_rate * 10) / 10,
-    avgLatencyMs: Math.round(r.avg_latency_ms),
-    totalInputTokens: r.total_input_tokens ?? 0,
-    totalOutputTokens: r.total_output_tokens ?? 0,
-  })));
+    const groups: Record<string, {
+      platform: string;
+      requests: number;
+      successCount: number;
+      totalLatency: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+    }> = {};
+
+    for (const r of requests) {
+      const p = r.platform;
+      if (!groups[p]) {
+        groups[p] = {
+          platform: p,
+          requests: 0,
+          successCount: 0,
+          totalLatency: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+        };
+      }
+      const g = groups[p];
+      g.requests++;
+      if (r.status === 'success') g.successCount++;
+      g.totalLatency += r.latencyMs || 0;
+      g.totalInputTokens += r.inputTokens || 0;
+      g.totalOutputTokens += r.outputTokens || 0;
+    }
+
+    const rows = Object.values(groups).map(g => ({
+      platform: g.platform,
+      requests: g.requests,
+      successRate: Math.round((g.successCount / g.requests) * 100 * 10) / 10,
+      avgLatencyMs: Math.round(g.totalLatency / g.requests),
+      totalInputTokens: g.totalInputTokens,
+      totalOutputTokens: g.totalOutputTokens,
+    }));
+
+    rows.sort((a, b) => b.requests - a.requests);
+
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching analytics by-platform:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 // Timeline data
-analyticsRouter.get('/timeline', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const interval = (req.query.interval as string) ?? (range === '24h' ? 'hour' : 'day');
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+analyticsRouter.get('/timeline', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const interval = (req.query.interval as string) ?? (range === '24h' ? 'hour' : 'day');
+    const since = getSinceTimestamp(range);
 
-  // dateFormat is a hardcoded whitelist — never user-controlled.
-  const dateFormat = interval === 'hour' ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+    const requests = await getUserRequests(uid, since);
 
-  const rows = db.prepare(`
-    SELECT
-      strftime('${dateFormat}', created_at) as timestamp,
-      COUNT(*) as requests,
-      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
-      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failure_count
-    FROM requests
-    WHERE created_at >= ?
-    GROUP BY strftime('${dateFormat}', created_at)
-    ORDER BY timestamp ASC
-  `).all(since) as any[];
+    const formatTimestamp = (isoString: string) => {
+      const date = new Date(isoString);
+      if (interval === 'hour') {
+        // Formats to YYYY-MM-DDTHH:00:00
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:00:00`;
+      } else {
+        // Formats to YYYY-MM-DD
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      }
+    };
 
-  res.json(rows.map(r => ({
-    timestamp: r.timestamp,
-    requests: r.requests,
-    successCount: r.success_count,
-    failureCount: r.failure_count,
-  })));
+    const groups: Record<string, {
+      timestamp: string;
+      requests: number;
+      successCount: number;
+      failureCount: number;
+    }> = {};
+
+    for (const r of requests) {
+      const ts = formatTimestamp(r.createdAt);
+      if (!groups[ts]) {
+        groups[ts] = {
+          timestamp: ts,
+          requests: 0,
+          successCount: 0,
+          failureCount: 0,
+        };
+      }
+      const g = groups[ts];
+      g.requests++;
+      if (r.status === 'success') g.successCount++;
+      else if (r.status === 'error') g.failureCount++;
+    }
+
+    const rows = Object.values(groups);
+    rows.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching analytics timeline:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
-// Error distribution (grouped by error type and platform)
-analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+// Helper to categorize errors
+function getErrorCategory(error: string): string {
+  const err = error.toLowerCase();
+  if (err.includes('429') || err.includes('rate limit') || err.includes('too many') || err.includes('quota')) {
+    return 'Rate Limited (429)';
+  }
+  if (err.includes('401') || err.includes('unauthorized') || err.includes('invalid') || err.includes('key')) {
+    return 'Auth Error (401)';
+  }
+  if (err.includes('403') || err.includes('forbidden')) {
+    return 'Forbidden (403)';
+  }
+  if (err.includes('404') || err.includes('not found')) {
+    return 'Not Found (404)';
+  }
+  if (err.includes('timeout') || err.includes('etimedout') || err.includes('econnrefused')) {
+    return 'Timeout/Connection';
+  }
+  if (err.includes('500') || err.includes('internal server')) {
+    return 'Server Error (500)';
+  }
+  if (err.includes('503') || err.includes('unavailable')) {
+    return 'Unavailable (503)';
+  }
+  return 'Other';
+}
 
-  // Group errors by category (extract the key part of the error message)
-  const rows = db.prepare(`
-    SELECT
-      platform,
-      model_id,
-      CASE
-        WHEN error LIKE '%429%' OR error LIKE '%rate limit%' OR error LIKE '%too many%' OR error LIKE '%quota%' THEN 'Rate Limited (429)'
-        WHEN error LIKE '%401%' OR error LIKE '%unauthorized%' OR error LIKE '%invalid.*key%' THEN 'Auth Error (401)'
-        WHEN error LIKE '%403%' OR error LIKE '%forbidden%' THEN 'Forbidden (403)'
-        WHEN error LIKE '%404%' OR error LIKE '%not found%' THEN 'Not Found (404)'
-        WHEN error LIKE '%timeout%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%ECONNREFUSED%' THEN 'Timeout/Connection'
-        WHEN error LIKE '%500%' OR error LIKE '%internal server%' THEN 'Server Error (500)'
-        WHEN error LIKE '%503%' OR error LIKE '%unavailable%' THEN 'Unavailable (503)'
-        ELSE 'Other'
-      END as error_category,
-      COUNT(*) as count
-    FROM requests
-    WHERE status = 'error' AND created_at >= ?
-    GROUP BY platform, error_category
-    ORDER BY count DESC
-  `).all(since) as any[];
+// Error distribution
+analyticsRouter.get('/error-distribution', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const since = getSinceTimestamp(range);
 
-  // Also get totals by category
-  const byCategory = db.prepare(`
-    SELECT
-      CASE
-        WHEN error LIKE '%429%' OR error LIKE '%rate limit%' OR error LIKE '%too many%' OR error LIKE '%quota%' THEN 'Rate Limited (429)'
-        WHEN error LIKE '%401%' OR error LIKE '%unauthorized%' OR error LIKE '%invalid.*key%' THEN 'Auth Error (401)'
-        WHEN error LIKE '%403%' OR error LIKE '%forbidden%' THEN 'Forbidden (403)'
-        WHEN error LIKE '%404%' OR error LIKE '%not found%' THEN 'Not Found (404)'
-        WHEN error LIKE '%timeout%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%ECONNREFUSED%' THEN 'Timeout/Connection'
-        WHEN error LIKE '%500%' OR error LIKE '%internal server%' THEN 'Server Error (500)'
-        WHEN error LIKE '%503%' OR error LIKE '%unavailable%' THEN 'Unavailable (503)'
-        ELSE 'Other'
-      END as category,
-      COUNT(*) as count
-    FROM requests
-    WHERE status = 'error' AND created_at >= ?
-    GROUP BY category
-    ORDER BY count DESC
-  `).all(since) as any[];
+    const requests = await getUserRequests(uid, since);
+    const errors = requests.filter(r => r.status === 'error');
 
-  // Errors by platform
-  const byPlatform = db.prepare(`
-    SELECT platform, COUNT(*) as count
-    FROM requests
-    WHERE status = 'error' AND created_at >= ?
-    GROUP BY platform
-    ORDER BY count DESC
-  `).all(since) as any[];
+    const byDetailed: Record<string, {
+      platform: string;
+      modelId: string;
+      error_category: string;
+      count: number;
+    }> = {};
 
-  res.json({
-    byCategory,
-    byPlatform,
-    detailed: rows,
-  });
+    const byCat: Record<string, {
+      category: string;
+      count: number;
+    }> = {};
+
+    const byPlat: Record<string, {
+      platform: string;
+      count: number;
+    }> = {};
+
+    for (const r of errors) {
+      const errorMsg = r.error || '';
+      const category = getErrorCategory(errorMsg);
+      const detailedKey = `${r.platform}_${category}`;
+
+      // Detailed
+      if (!byDetailed[detailedKey]) {
+        byDetailed[detailedKey] = {
+          platform: r.platform,
+          modelId: r.modelId,
+          error_category: category,
+          count: 0
+        };
+      }
+      byDetailed[detailedKey].count++;
+
+      // By Category
+      if (!byCat[category]) {
+        byCat[category] = { category, count: 0 };
+      }
+      byCat[category].count++;
+
+      // By Platform
+      if (!byPlat[r.platform]) {
+        byPlat[r.platform] = { platform: r.platform, count: 0 };
+      }
+      byPlat[r.platform].count++;
+    }
+
+    const detailedRows = Object.values(byDetailed).sort((a, b) => b.count - a.count);
+    const catRows = Object.values(byCat).sort((a, b) => b.count - a.count);
+    const platRows = Object.values(byPlat).sort((a, b) => b.count - a.count);
+
+    res.json({
+      byCategory: catRows,
+      byPlatform: platRows,
+      detailed: detailedRows,
+    });
+  } catch (error) {
+    console.error('Error fetching error distribution:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
-// Recent errors
-analyticsRouter.get('/errors', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '7d';
-  const since = getSinceTimestamp(range);
-  const db = getDb();
+// Recent errors (limit 50)
+analyticsRouter.get('/errors', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const range = (req.query.range as string) ?? '7d';
+    const since = getSinceTimestamp(range);
 
-  const rows = db.prepare(`
-    SELECT id, platform, model_id, error, latency_ms, created_at
-    FROM requests
-    WHERE status = 'error' AND created_at >= ?
-    ORDER BY created_at DESC
-    LIMIT 50
-  `).all(since) as any[];
+    const requests = await getUserRequests(uid, since);
+    const errors = requests.filter(r => r.status === 'error');
 
-  res.json(rows.map(r => ({
-    id: r.id,
-    platform: r.platform,
-    modelId: r.model_id,
-    error: r.error,
-    latencyMs: r.latency_ms,
-    createdAt: r.created_at,
-  })));
+    // Sort descending by createdAt
+    errors.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    const result = errors.slice(0, 50).map(r => ({
+      id: r.id,
+      platform: r.platform,
+      modelId: r.modelId,
+      error: r.error,
+      latencyMs: r.latencyMs,
+      createdAt: r.createdAt,
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching recent errors:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });

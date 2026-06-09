@@ -5,9 +5,18 @@ import { z } from 'zod';
 import type { ChatMessage, Platform } from '@freellmapi/shared/types.js';
 import { routeRequest, recordRateLimitHit, recordSuccess, type RouteResult } from '../services/router.js';
 import { recordRequest, recordTokens, setCooldown } from '../services/ratelimit.js';
-import { getDb, getUnifiedApiKey, getSetting, lookupUserKey, incrementUserKeyUsage } from '../db/index.js';
+import {
+  getGlobalModels,
+  lookupUserByUnifiedApiKey,
+  lookupClientKey,
+  incrementClientKeyUsage,
+  resolveAlias,
+  logRequest,
+  getUserSetting
+} from '../db/index.js';
 import { translatePrompt } from '../services/prompt-translator.js';
 import { ENV } from '../env.js';
+
 export const proxyRouter = Router();
 
 const AUTO_MODEL_ID = 'auto';
@@ -16,14 +25,7 @@ function isAutoModel(modelId: string | undefined): boolean {
   return modelId === AUTO_MODEL_ID;
 }
 
-function timingSafeStringEqual(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  const compareA = a.length === b.length ? a : Buffer.alloc(b.length);
-  return crypto.timingSafeEqual(compareA, b) && a.length === b.length;
-}
-
-const stickySessionMap = new Map<string, { modelDbId: number; lastUsed: number }>();
+const stickySessionMap = new Map<string, { modelDbId: string; lastUsed: number }>();
 const STICKY_TTL_MS = 30 * 60 * 1000;
 
 function getSessionKey(messages: ChatMessage[]): string {
@@ -33,7 +35,7 @@ function getSessionKey(messages: ChatMessage[]): string {
   return `${hash}:${messages.length > 2 ? 'multi' : 'single'}`;
 }
 
-function getStickyModel(messages: ChatMessage[]): number | undefined {
+function getStickyModel(messages: ChatMessage[]): string | undefined {
   const hasAssistant = messages.some(m => m.role === 'assistant');
   if (!hasAssistant) return undefined;
   const key = getSessionKey(messages);
@@ -47,7 +49,7 @@ function getStickyModel(messages: ChatMessage[]): number | undefined {
   return entry.modelDbId;
 }
 
-function setStickyModel(messages: ChatMessage[], modelDbId: number) {
+function setStickyModel(messages: ChatMessage[], modelDbId: string) {
   const key = getSessionKey(messages);
   if (!key) return;
   stickySessionMap.set(key, { modelDbId, lastUsed: Date.now() });
@@ -59,30 +61,37 @@ function setStickyModel(messages: ChatMessage[], modelDbId: number) {
   }
 }
 
-proxyRouter.get('/models', (_req: Request, res: Response) => {
-  const db = getDb();
-  const models = db.prepare('SELECT platform, model_id, display_name, context_window FROM models WHERE enabled = 1 ORDER BY intelligence_rank').all() as any[];
-  res.json({
-    object: 'list',
-    data: [
-      {
-        id: AUTO_MODEL_ID,
-        object: 'model',
-        created: 0,
-        owned_by: 'freellmapi',
-        name: 'Auto (router picks the best available model)',
-        context_window: null,
-      },
-      ...models.map(m => ({
-        id: m.model_id,
-        object: 'model',
-        created: 0,
-        owned_by: m.platform,
-        name: m.display_name,
-        context_window: m.context_window,
-      })),
-    ],
-  });
+proxyRouter.get('/models', async (_req: Request, res: Response) => {
+  try {
+    const models = await getGlobalModels();
+    const enabledModels = models.filter(m => m.enabled);
+    enabledModels.sort((a, b) => a.intelligenceRank - b.intelligenceRank);
+
+    res.json({
+      object: 'list',
+      data: [
+        {
+          id: AUTO_MODEL_ID,
+          object: 'model',
+          created: 0,
+          owned_by: 'freellmapi',
+          name: 'Auto (router picks the best available model)',
+          context_window: null,
+        },
+        ...enabledModels.map(m => ({
+          id: m.modelId,
+          object: 'model',
+          created: 0,
+          owned_by: m.platform,
+          name: m.displayName,
+          context_window: m.contextWindow,
+        })),
+      ],
+    });
+  } catch (error) {
+    console.error('Error fetching proxy models:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
 });
 
 const MAX_RETRIES = 20;
@@ -178,38 +187,40 @@ function isRetryableError(err: any): boolean {
 
 proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const start = Date.now();
-  const db = getDb();
-
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  const unifiedKey = getUnifiedApiKey();
-  const multiTenant = (getSetting('multi_tenant_auth') ?? ENV.MULTI_TENANT_AUTH_ENABLED) === 'true';
-
-  let userKeyId: number | null = null;
-  let userQuota: number | null = null;
-  let userTokensUsed: number = 0;
 
   if (!token) {
     res.status(401).json({ error: { message: 'Missing API key', type: 'authentication_error' } });
     return;
   }
 
-  if (multiTenant) {
-    if (!timingSafeStringEqual(token, unifiedKey)) {
+  let uid: string;
+  let userKeyHashed: string | null = null;
+  let userQuota: number | null = null;
+  let userTokensUsed: number = 0;
+
+  try {
+    // 1. Check if token is a direct user unified API key
+    const user = await lookupUserByUnifiedApiKey(token);
+    if (user) {
+      uid = user.uid;
+    } else {
+      // 2. Check if token is a generated client key (e.g. for Fixo CLI)
       const hashed = crypto.createHash('sha256').update(token).digest('hex');
-      const userKey = lookupUserKey(hashed);
-      if (!userKey || !userKey.enabled) {
+      const clientKey = await lookupClientKey(hashed);
+      if (!clientKey) {
         res.status(401).json({ error: { message: 'Invalid or disabled API key', type: 'authentication_error' } });
         return;
       }
-      userKeyId = userKey.id;
-      userQuota = userKey.daily_token_quota;
-      userTokensUsed = userKey.tokens_used_today;
+      uid = clientKey.userId;
+      userKeyHashed = hashed;
+      userQuota = clientKey.dailyTokenQuota;
+      userTokensUsed = clientKey.tokensUsedToday;
     }
-  } else {
-    if (!timingSafeStringEqual(token, unifiedKey)) {
-      res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
-      return;
-    }
+  } catch (error) {
+    console.error('Error authenticating proxy request:', error);
+    res.status(500).json({ error: { message: 'Authentication failed' } });
+    return;
   }
 
   const parsed = chatCompletionSchema.safeParse(req.body);
@@ -259,7 +270,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   }, 0);
   const estimatedTotal = estimatedInputTokens + (max_tokens ?? 1000);
 
-  if (userKeyId !== null && userQuota !== null) {
+  if (userKeyHashed !== null && userQuota !== null) {
     if (userTokensUsed + estimatedTotal > userQuota) {
       res.status(429).json({ error: { message: 'Daily quota exceeded', type: 'rate_limit_error' } });
       return;
@@ -269,22 +280,25 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // Model Alias Resolution
   let resolvedModel = requestedModel;
   if (requestedModel) {
-    const aliasEntry = db.prepare('SELECT target_model_db_id FROM model_aliases WHERE alias = ?').get(requestedModel) as any;
-    if (aliasEntry && aliasEntry.target_model_db_id) {
-      const target = db.prepare('SELECT model_id FROM models WHERE id = ?').get(aliasEntry.target_model_db_id) as any;
-      if (target) resolvedModel = target.model_id;
+    const targetModelId = await resolveAlias(uid, requestedModel);
+    if (targetModelId) {
+      // Find model by ID
+      const globalModels = await getGlobalModels();
+      const target = globalModels.find(m => m.id === targetModelId);
+      if (target) resolvedModel = target.modelId;
     }
   }
 
-  let preferredModel: number | undefined;
+  let preferredModel: string | undefined;
+  const globalModels = await getGlobalModels();
   if (isAutoModel(resolvedModel)) {
     preferredModel = getStickyModel(messages);
   } else if (resolvedModel) {
-    const enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(resolvedModel) as { id: number } | undefined;
+    const enabled = globalModels.find(m => m.modelId === resolvedModel && m.enabled);
     if (enabled) {
       preferredModel = enabled.id;
     } else {
-      const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(resolvedModel) as { id: number } | undefined;
+      const disabled = globalModels.find(m => m.modelId === resolvedModel);
       const reason = disabled ? 'is disabled' : 'is not in the catalog';
       res.status(400).json({
         error: {
@@ -310,7 +324,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     let route: RouteResult;
     try {
-      route = routeRequest(estimatedTotal, estimatedInputTokens, skipKeys.size > 0 ? skipKeys : undefined, preferredModel, requiresTools);
+      route = await routeRequest(uid, estimatedTotal, estimatedInputTokens, skipKeys.size > 0 ? skipKeys : undefined, preferredModel, requiresTools);
     } catch (err: any) {
       if (lastError) {
         res.status(429).json({
@@ -329,12 +343,16 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
     recordRequest(route.platform, route.modelId, route.keyId);
 
-    const routeDbModel = db.prepare('SELECT context_window FROM models WHERE id = ?').get(route.modelDbId) as any;
-    const contextWindow = routeDbModel?.context_window || null;
+    const targetModel = globalModels.find(m => m.id === route.modelDbId);
+    const contextWindow = targetModel?.contextWindow || null;
+
+    const userPromptTranslationVal = await getUserSetting(uid, 'prompt_translation');
+    const isPromptTranslationEnabled = (userPromptTranslationVal ?? ENV.PROMPT_TRANSLATION_ENABLED) === 'true';
 
     const { messages: translatedMessages, options: translatedOptions } = translatePrompt(
       messages, route.platform as Platform, route.modelId, contextWindow, estimatedInputTokens,
-      { temperature, max_tokens, top_p, tools, tool_choice, parallel_tool_calls }
+      { temperature, max_tokens, top_p, tools, tool_choice, parallel_tool_calls },
+      isPromptTranslationEnabled
     );
 
     try {
@@ -369,11 +387,18 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
           const totalTokens = estimatedInputTokens + totalOutputTokens;
           recordTokens(route.platform, route.modelId, route.keyId, totalTokens);
-          if (userKeyId !== null) incrementUserKeyUsage(userKeyId, totalTokens);
+          if (userKeyHashed !== null) await incrementClientKeyUsage(userKeyHashed, totalTokens);
 
           recordSuccess(route.modelDbId);
           setStickyModel(messages, route.modelDbId);
-          logRequest(route.platform, route.modelId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null);
+          await logRequest(uid, {
+            platform: route.platform,
+            modelId: route.modelId,
+            status: 'success',
+            inputTokens: estimatedInputTokens,
+            outputTokens: totalOutputTokens,
+            latencyMs: Date.now() - start
+          });
           return;
         } catch (streamErr: any) {
           if (streamStarted) {
@@ -381,7 +406,15 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             const payload = { error: { message: `Provider error (${route.displayName}): stream interrupted`, type: 'stream_error' } };
             try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch { /* socket gone */ }
             try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
-            logRequest(route.platform, route.modelId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, streamErr.message);
+            await logRequest(uid, {
+              platform: route.platform,
+              modelId: route.modelId,
+              status: 'error',
+              inputTokens: estimatedInputTokens,
+              outputTokens: totalOutputTokens,
+              latencyMs: Date.now() - start,
+              error: streamErr.message
+            });
             return;
           }
           throw streamErr;
@@ -393,7 +426,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
         const totalTokens = result.usage?.total_tokens ?? 0;
         recordTokens(route.platform, route.modelId, route.keyId, totalTokens);
-        if (userKeyId !== null) incrementUserKeyUsage(userKeyId, totalTokens);
+        if (userKeyHashed !== null) await incrementClientKeyUsage(userKeyHashed, totalTokens);
 
         recordSuccess(route.modelDbId);
         setStickyModel(messages, route.modelDbId);
@@ -402,17 +435,27 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (attempt > 0) res.setHeader('X-Fallback-Attempts', String(attempt));
         res.json(result);
 
-        logRequest(
-          route.platform, route.modelId, 'success',
-          result.usage?.prompt_tokens ?? 0,
-          result.usage?.completion_tokens ?? 0,
-          Date.now() - start, null,
-        );
+        await logRequest(uid, {
+          platform: route.platform,
+          modelId: route.modelId,
+          status: 'success',
+          inputTokens: result.usage?.prompt_tokens ?? 0,
+          outputTokens: result.usage?.completion_tokens ?? 0,
+          latencyMs: Date.now() - start
+        });
         return;
       }
     } catch (err: any) {
       const latency = Date.now() - start;
-      logRequest(route.platform, route.modelId, 'error', estimatedInputTokens, 0, latency, err.message);
+      await logRequest(uid, {
+        platform: route.platform,
+        modelId: route.modelId,
+        status: 'error',
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        latencyMs: latency,
+        error: err.message
+      });
 
       if (isRetryableError(err)) {
         const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
@@ -441,23 +484,3 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     },
   });
 });
-
-function logRequest(
-  platform: string,
-  modelId: string,
-  status: string,
-  inputTokens: number,
-  outputTokens: number,
-  latencyMs: number,
-  error: string | null,
-) {
-  try {
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, status, inputTokens, outputTokens, latencyMs, error);
-  } catch (e) {
-    console.error('Failed to log request:', e);
-  }
-}

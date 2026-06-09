@@ -1,0 +1,13 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "freeLLMAPI for FixO-CLI",
+        "supportEmail": "firehox786@gmail.com"
+      }
+    }
+  }
+}

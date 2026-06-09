@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb } from '../../db/index.js';
+import { initDb } from '../../db/index.js';
+import { firestore } from '../../lib/firebaseAdmin.js';
 
 async function request(app: Express, method: string, path: string, body?: any) {
   const server = app.listen(0);
@@ -10,7 +11,10 @@ async function request(app: Express, method: string, path: string, body?: any) {
 
   const res = await fetch(url, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: {
+      Authorization: 'Bearer test-token',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -22,15 +26,21 @@ async function request(app: Express, method: string, path: string, body?: any) {
 describe('Keys API', () => {
   let app: Express;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    await initDb();
     app = createApp();
   });
 
   beforeEach(() => {
-    const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
+    if ('data' in firestore) {
+      const keys = Object.keys((firestore as any).data);
+      for (const k of keys) {
+        if (!k.startsWith('global_models/')) {
+          delete (firestore as any).data[k];
+        }
+      }
+    }
   });
 
   it('GET /api/keys returns empty array initially', async () => {

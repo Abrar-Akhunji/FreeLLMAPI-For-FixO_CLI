@@ -13,7 +13,7 @@
     "build:server": "npm run build -w server",
     "keys:import": "npm run keys:import -w server",
     "mcp": "npm run mcp -w server",
-    "pack": "npm run build && zip -r Archive.zip package.json package-lock.json shared/dist shared/package.json server/dist server/package.json client/dist client/package.json fixo-builder-firebase-adminsdk-fbsvc-652e7036dc.json",
+    "pack": "npm run build && zip -r Archive.zip app.js package.json package-lock.json shared/dist shared/package.json server/dist server/package.json client/dist client/package.json && echo '\\n[pack] Archive.zip ready. NOTE: service account JSON is intentionally excluded — set GOOGLE_APPLICATION_CREDENTIALS as an env var on the host and upload the JSON out-of-band (e.g. via SFTP to a path outside the web root).'",
     "audit": "npm audit || true"
   },
   "devDependencies": {

@@ -87,7 +87,15 @@ export function createApp() {
       callback(null, !origin || allowedCorsOrigins.has(origin));
     },
   }));
-  app.use(express.json({ limit: '1mb' }));
+
+  // Body size policy:
+  // - /v1/* (LLM proxy): 4MB to accommodate long system prompts + context windows
+  // - /api/* (dashboard CRUD): 256kb is plenty
+  // Both bodies are JSON-validated by Zod downstream.
+  const proxyJson = express.json({ limit: '4mb' });
+  const apiJson = express.json({ limit: '256kb' });
+  app.use('/v1', proxyJson);
+  app.use('/api', apiJson);
 
   // IP Rate Limiting
   const apiLimiter = createIpRateLimiter(100, 'API dashboard');

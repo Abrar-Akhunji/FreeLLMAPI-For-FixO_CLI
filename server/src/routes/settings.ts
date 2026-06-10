@@ -9,8 +9,44 @@ export const settingsRouter = Router();
 
 settingsRouter.use(authMiddleware);
 
-// Get current settings
-settingsRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
+// GET /api/settings/api-key
+settingsRouter.get('/api-key', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const unifiedApiKey = await getUnifiedApiKey(uid);
+    res.json({ apiKey: unifiedApiKey });
+  } catch (error) {
+    console.error('Error fetching unified API key:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
+});
+
+// POST /api/settings/api-key/regenerate
+settingsRouter.post('/api-key/regenerate', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const newKey = await regenerateUnifiedKey(uid);
+    res.json({ success: true, key: newKey });
+  } catch (error) {
+    console.error('Error regenerating unified API key:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
+});
+
+// POST /api/settings/regenerate-key (for backward compatibility)
+settingsRouter.post('/regenerate-key', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const newKey = await regenerateUnifiedKey(uid);
+    res.json({ success: true, key: newKey });
+  } catch (error) {
+    console.error('Error regenerating unified API key:', error);
+    res.status(500).json({ error: { message: 'Internal server error' } });
+  }
+});
+
+// GET /api/settings/global (and GET /api/settings)
+const getSettingsHandler = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const uid = req.user!.uid;
     const settings = await getUserSettings(uid);
@@ -28,7 +64,10 @@ settingsRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
     console.error('Error fetching settings:', error);
     res.status(500).json({ error: { message: 'Internal server error' } });
   }
-});
+};
+
+settingsRouter.get('/', getSettingsHandler);
+settingsRouter.get('/global', getSettingsHandler);
 
 const updateSettingsSchema = z.object({
   smart_routing: z.union([z.boolean(), z.enum(['true', 'false'])]).optional().transform(val => val !== undefined ? String(val) : undefined),
@@ -37,8 +76,8 @@ const updateSettingsSchema = z.object({
   ollama_local_url: z.string().max(256).optional().transform(val => val?.replace(/[<>]/g, '')),
 });
 
-// Update settings
-settingsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
+// PUT /api/settings/global, POST /api/settings/global, and POST /api/settings
+const updateSettingsHandler = async (req: AuthenticatedRequest, res: Response) => {
   const parsed = updateSettingsSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -59,16 +98,9 @@ settingsRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
     console.error('Error updating settings:', error);
     res.status(500).json({ error: { message: 'Internal server error' } });
   }
-});
+};
 
-// Regenerate unified API key
-settingsRouter.post('/regenerate-key', async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const uid = req.user!.uid;
-    const newKey = await regenerateUnifiedKey(uid);
-    res.json({ success: true, key: newKey });
-  } catch (error) {
-    console.error('Error regenerating unified API key:', error);
-    res.status(500).json({ error: { message: 'Internal server error' } });
-  }
-});
+settingsRouter.post('/', updateSettingsHandler);
+settingsRouter.post('/global', updateSettingsHandler);
+settingsRouter.put('/global', updateSettingsHandler);
+

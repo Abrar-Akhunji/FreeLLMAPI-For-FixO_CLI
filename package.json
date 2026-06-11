@@ -1,6 +1,7 @@
 {
   "name": "freellmapi",
   "private": true,
+  "type": "module",
   "workspaces": [
     "shared",
     "server",

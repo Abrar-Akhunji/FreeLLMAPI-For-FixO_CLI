@@ -10,6 +10,9 @@
     "server",
     "client"
   ],
+  "overrides": {
+    "jose": "^4.15.5"
+  },
   "scripts": {
     "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
     "test": "npm run test -w server && npm run test -w client",

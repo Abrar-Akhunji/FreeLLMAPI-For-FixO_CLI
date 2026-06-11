@@ -1,0 +1,50 @@
+# Build artifacts that should be regenerated on Vercel
+node_modules
+client/node_modules
+server/node_modules
+shared/node_modules
+
+# Local-only / not needed for prod serverless build
+.env
+.env.local
+.fixo/
+.freellmapi_history
+.firebaserc
+firebase.json
+firestore.rules
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Large archives & local zips (must never be uploaded to Vercel)
+Archive.zip
+client-dist.zip
+import.env
+
+# Service-account credentials — supply via FIREBASE_SERVICE_ACCOUNT env var instead
+fixo-builder-firebase-adminsdk-fbsvc-*.json
+service-account.json
+*-firebase-adminsdk-*.json
+
+# Local DBs / logs
+*.db
+*.db-wal
+*.db-shm
+*.log
+server/data/
+
+# Docs / assets unused by the runtime
+README.md
+LICENSE
+docs/
+repo-assets/
+free-ai-apis.pdf
+free-ai-apis.typ
+calculator.html
+scratch.js
+scratch2.js
+
+# Editor cruft
+.DS_Store
+.vscode/
+.idea/

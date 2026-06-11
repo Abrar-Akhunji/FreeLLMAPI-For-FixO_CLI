@@ -33,7 +33,18 @@ function getAllowedCorsOrigins() {
   return new Set([...DEFAULT_DASHBOARD_ORIGINS, ...configuredOrigins]);
 }
 
-export function createApp() {
+export interface CreateAppOptions {
+  /**
+   * Serve the built React client from /client/dist and provide an SPA fallback.
+   * Default true. Set false in serverless deployments (e.g. Vercel) where the
+   * platform serves static assets directly and the function only handles
+   * /api/* and /v1/* routes.
+   */
+  serveStatic?: boolean;
+}
+
+export function createApp(options: CreateAppOptions = {}) {
+  const { serveStatic = true } = options;
   const app = express();
   const allowedCorsOrigins = getAllowedCorsOrigins();
 
@@ -125,17 +136,19 @@ export function createApp() {
   // Error handler (for API routes)
   app.use(errorHandler);
 
-  // Serve client static files (after API error handler)
-  const clientDist = path.resolve(__dirname, '../../client/dist');
-  app.use(express.static(clientDist));
-  // SPA fallback — serve index.html for non-API routes
-  app.use((req, res, next) => {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/v1/')) {
-      next();
-      return;
-    }
-    res.sendFile(path.join(clientDist, 'index.html'));
-  });
+  if (serveStatic) {
+    // Serve client static files (after API error handler)
+    const clientDist = path.resolve(__dirname, '../../client/dist');
+    app.use(express.static(clientDist));
+    // SPA fallback — serve index.html for non-API routes
+    app.use((req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/v1/')) {
+        next();
+        return;
+      }
+      res.sendFile(path.join(clientDist, 'index.html'));
+    });
+  }
 
   return app;
 }

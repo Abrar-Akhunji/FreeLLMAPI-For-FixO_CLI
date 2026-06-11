@@ -13,8 +13,6 @@
     }
   },
   "rewrites": [
-    { "source": "/api/_diag", "destination": "/api/_diag.mjs" },
-    { "source": "/api/_cjs", "destination": "/api/_diag.cjs" },
     { "source": "/api/(.*)", "destination": "/api/index.mjs" },
     { "source": "/v1/(.*)", "destination": "/api/index.mjs" },
     { "source": "/((?!api/|v1/|assets/).*)", "destination": "/index.html" }

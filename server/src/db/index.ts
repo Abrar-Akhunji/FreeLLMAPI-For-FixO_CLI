@@ -81,29 +81,28 @@ export async function initDb(): Promise<void> {
   try {
     await seedGlobalModels();
   } catch (error: any) {
-    const isCredsError = 
-      error.message?.includes('Could not load the default credentials') || 
+    const isCredsError =
+      error.message?.includes('Could not load the default credentials') ||
       error.message?.includes('NO_ADC_FOUND') ||
       error.code === 'credentials-invalid' ||
       error.stack?.includes('googleauth.js');
-      
-    if (isCredsError) {
-      console.error(`
-================================================================================
-[ERROR] Firebase Admin credentials could not be loaded!
-To run the server locally, you must provide Firebase credentials.
 
-Please follow these steps:
-1. Open the Firebase Console for your project 'fixo-builder'.
-2. Go to Project Settings (gear icon) -> Service Accounts.
-3. Click "Generate new private key" to download your credentials JSON file.
-4. Save it as 'service-account.json' in the root of the project directory:
-   /Users/abrarakhunji/Desktop/FreeLLMAPI/freellmapi/
-5. Add the following line to your '.env' file:
-   GOOGLE_APPLICATION_CREDENTIALS="service-account.json"
-================================================================================
-      `);
-      process.exit(1);
+    if (isCredsError) {
+      // Don't call process.exit() here — in a serverless function (Vercel)
+      // that kills the lambda and surfaces as FUNCTION_INVOCATION_FAILED with
+      // no useful body. Throw instead so the handler can return a JSON 500.
+      const msg =
+        'Firebase Admin credentials could not be loaded. Set the ' +
+        'FIREBASE_SERVICE_ACCOUNT environment variable to the full JSON ' +
+        "contents of a Firebase service-account key (Console → Project " +
+        'Settings → Service Accounts → Generate new private key). ' +
+        'Locally you can instead set GOOGLE_APPLICATION_CREDENTIALS to an ' +
+        'absolute path to that JSON file. Underlying error: ' +
+        (error.message ?? String(error));
+      console.error('[initDb] ' + msg);
+      const wrapped = new Error(msg);
+      (wrapped as any).code = 'FIREBASE_CREDENTIALS_MISSING';
+      throw wrapped;
     }
     throw error;
   }

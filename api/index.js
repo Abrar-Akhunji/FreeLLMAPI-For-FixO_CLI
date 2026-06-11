@@ -14,8 +14,8 @@ async function getApp() {
       // from /dist; this function only handles /api/* and /v1/*.
       return createApp({ serveStatic: false });
     })().catch((err) => {
-      // On failure, clear the cache so the next request retries init
-      // instead of permanently serving 500s from a poisoned container.
+      // Clear cache so the next request retries init instead of permanently
+      // serving 500s from a poisoned container.
       appPromise = null;
       throw err;
     });
@@ -24,16 +24,23 @@ async function getApp() {
 }
 
 export default async function handler(req, res) {
+  let app;
   try {
-    const app = await getApp();
-    return app(req, res);
+    app = await getApp();
   } catch (err) {
     console.error('[api] initialization failed:', err);
+    // Always include the error detail for init failures — these are
+    // configuration problems (missing FIREBASE_SERVICE_ACCOUNT, bad
+    // ENCRYPTION_KEY, etc.) that the operator needs to see to fix the
+    // deployment. They are not data leaks.
     res.status(500).json({
       error: {
         message: 'Server initialization failed',
-        detail: process.env.NODE_ENV === 'production' ? undefined : String(err?.message ?? err),
+        code: err?.code ?? 'INIT_FAILED',
+        detail: String(err?.message ?? err),
       },
     });
+    return;
   }
+  return app(req, res);
 }

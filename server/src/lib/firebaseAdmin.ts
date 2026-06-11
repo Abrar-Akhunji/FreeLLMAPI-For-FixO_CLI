@@ -211,20 +211,42 @@ import { fileURLToPath } from 'url';
 
 const isTest = process.env.NODE_ENV === 'test';
 
+// Important: do NOT throw at module-import time. This module is imported by
+// the Vercel serverless entry point, and a thrown error here surfaces as an
+// opaque FUNCTION_INVOCATION_FAILED instead of a clean JSON 500. Validate the
+// service account if present (logging warnings on bad input), then let the
+// first Firestore call fail naturally — initDb() catches it and re-throws a
+// clear, actionable error that the request handler returns as JSON.
 if (!isTest && getApps().length === 0) {
   const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  let initialized = false;
+
   if (serviceAccountJson) {
     try {
       const serviceAccount = JSON.parse(serviceAccountJson);
-      initializeApp({
-        credential: cert(serviceAccount),
-        projectId: 'fixo-builder',
-      });
+      const hasRequired =
+        serviceAccount?.project_id &&
+        serviceAccount?.private_key &&
+        serviceAccount?.client_email;
+      if (!hasRequired) {
+        console.error(
+          '[firebaseAdmin] FIREBASE_SERVICE_ACCOUNT JSON is missing required ' +
+            'fields (project_id, private_key, client_email). Re-download the ' +
+            'service-account key from Firebase Console and paste the FULL JSON.'
+        );
+      } else {
+        initializeApp({
+          credential: cert(serviceAccount),
+          projectId: serviceAccount.project_id,
+        });
+        initialized = true;
+      }
     } catch (err: any) {
-      console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT env var:', err.message);
-      initializeApp({
-        projectId: 'fixo-builder',
-      });
+      console.error(
+        '[firebaseAdmin] FIREBASE_SERVICE_ACCOUNT is set but is not valid ' +
+          'JSON. Paste the full contents of the .json file (including curly ' +
+          'braces) as the env-var value. Parse error: ' + err.message
+      );
     }
   } else {
     const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -233,10 +255,13 @@ if (!isTest && getApps().length === 0) {
       const absoluteCredsPath = path.resolve(__dirname, '../../../', googleCreds);
       process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredsPath;
     }
+  }
 
-    initializeApp({
-      projectId: 'fixo-builder',
-    });
+  if (!initialized) {
+    // Fallback init so getFirestore() below doesn't throw at top level.
+    // Actual Firestore calls will fail with a credentials error that
+    // initDb() catches and translates into a clear, JSON-friendly message.
+    initializeApp({ projectId: 'fixo-builder' });
   }
 }
 

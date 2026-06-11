@@ -6,16 +6,16 @@
   "outputDirectory": "dist",
   "framework": null,
   "functions": {
-    "api/index.js": {
+    "api/index.mjs": {
       "memory": 1024,
       "maxDuration": 60,
       "includeFiles": "server/dist/**"
     }
   },
   "rewrites": [
-    { "source": "/api/_diag", "destination": "/api/_diag.js" },
-    { "source": "/api/(.*)", "destination": "/api/index.js" },
-    { "source": "/v1/(.*)", "destination": "/api/index.js" },
+    { "source": "/api/_diag", "destination": "/api/_diag.mjs" },
+    { "source": "/api/(.*)", "destination": "/api/index.mjs" },
+    { "source": "/v1/(.*)", "destination": "/api/index.mjs" },
     { "source": "/((?!api/|v1/|assets/).*)", "destination": "/index.html" }
   ]
 }

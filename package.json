@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
     "test": "npm run test -w server && npm run test -w client",
-    "build": "npm run build -w server && npm run build -w client",
+    "build": "npm run build -w server && npm run build -w client && mkdir -p dist && cp -r client/dist/* dist/",
     "build:server": "npm run build -w server",
     "keys:import": "npm run keys:import -w server",
     "mcp": "npm run mcp -w server",

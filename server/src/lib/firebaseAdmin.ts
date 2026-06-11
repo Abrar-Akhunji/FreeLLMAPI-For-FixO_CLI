@@ -1,4 +1,4 @@
-import { getApps, initializeApp } from 'firebase-admin/app';
+import { getApps, initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 
@@ -212,16 +212,32 @@ import { fileURLToPath } from 'url';
 const isTest = process.env.NODE_ENV === 'test';
 
 if (!isTest && getApps().length === 0) {
-  const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (googleCreds && !path.isAbsolute(googleCreds)) {
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const absoluteCredsPath = path.resolve(__dirname, '../../../', googleCreds);
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredsPath;
-  }
+  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (serviceAccountJson) {
+    try {
+      const serviceAccount = JSON.parse(serviceAccountJson);
+      initializeApp({
+        credential: cert(serviceAccount),
+        projectId: 'fixo-builder',
+      });
+    } catch (err: any) {
+      console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT env var:', err.message);
+      initializeApp({
+        projectId: 'fixo-builder',
+      });
+    }
+  } else {
+    const googleCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (googleCreds && !path.isAbsolute(googleCreds)) {
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const absoluteCredsPath = path.resolve(__dirname, '../../../', googleCreds);
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = absoluteCredsPath;
+    }
 
-  initializeApp({
-    projectId: 'fixo-builder',
-  });
+    initializeApp({
+      projectId: 'fixo-builder',
+    });
+  }
 }
 
 export const adminAuth = isTest ? (mockAdminAuth as any) : getAuth();

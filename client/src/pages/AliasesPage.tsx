@@ -41,7 +41,9 @@ export default function AliasesPage() {
           setKeyState(data.apiKey);
           return data.apiKey;
         }
-      } catch (e) {}
+      } catch {
+        // Suppress error if API key endpoint is not configured or authenticated yet
+      }
       return '';
     },
     enabled: !key

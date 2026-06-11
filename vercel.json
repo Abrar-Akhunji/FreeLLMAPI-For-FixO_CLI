@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/v1/:path*",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/((?!api|v1|assets|favicon.ico).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

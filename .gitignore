@@ -18,3 +18,8 @@ fixo-builder-firebase-adminsdk-fbsvc-652e7036dc.json
 Archive.zip
 .fixo/
 temp_opencode/
+
+# Exclude local env/zip artifacts
+import.env
+client-dist.zip
+
